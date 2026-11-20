@@ -81,6 +81,7 @@ def run_single_team(args, agent_cfg, method_cfg, device, parity_check, write_jso
     world_type = {"lbf": TorchForaging, "pp": TorchPredatorPrey}[scene]
     protocol = dict(scene=scene, start_distribution="random", fixed_teammate_slot=2, episode_limit=world_type.episode_limit,
                     training_steps=args.total_steps, training_seed=args.seed, num_envs=args.num_envs,
+                    bootstrap_at_time_limit=method_cfg.get("bootstrap_at_time_limit", True),
                     validation_seed=650000, validation_maps=n_validate, test_seed_start=test_seeds.start,
                     test_maps=len(test_seeds), validation_interval=50000,
                     selection=["full_completion_rate", "mean_return"],

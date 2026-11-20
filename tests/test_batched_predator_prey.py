@@ -54,3 +54,32 @@ class BatchedPredatorPreyTests(unittest.TestCase):
         self.assertEqual(paired_return_difference(a, [0, 20, 10, 40])["bootstrap_95_ci"], [10, 10])
         with self.assertRaises(ValueError):
             paired_return_difference(a, [0])
+
+    def test_time_limit_option_changes_only_the_last_target(self):
+        actor = yaml.safe_load((ROOT / "configs/agents/drqn.yaml").read_text())
+        cfg = yaml.safe_load((ROOT / "configs/methods/qmix.yaml").read_text())
+        def learner(**options):
+            return BatchedQMIX(actor, dict(cfg, **options), device="cpu", seed=4, world_type=TorchPredatorPrey)
+
+        baseline = learner()
+        finite = learner(bootstrap_at_time_limit=False)
+        reference = learner()
+        sample = baseline._collect(TorchPredatorPrey(2, "cpu", seed=7), "random", 0)
+        self.assertFalse(sample["terminated"].any())
+        self.assertFalse(sample["truncated"][:, :-1].any())
+        self.assertTrue(sample["truncated"][:, -1].all())
+        self.assertTrue(sample["filled"].all())
+        last_is_terminal = sample["terminated"].clone()
+        last_is_terminal[:, -1] = True
+        # A constant target value isolates the mask from the random mixer initialization.
+        for model in (baseline, finite, reference):
+            for param in model.target_mixer.parameters():
+                param.zero_()
+            model.target_mixer.V[-1].bias.fill_(10)
+        default_loss = baseline._update(sample)
+        finite_loss = finite._update(sample)
+        expected_loss = reference._update(dict(sample, terminated=last_is_terminal))
+        self.assertGreater(default_loss.item(), finite_loss.item())
+        torch.testing.assert_close(finite_loss, expected_loss)
+        for left, right in zip(finite.params, reference.params):
+            torch.testing.assert_close(left, right)

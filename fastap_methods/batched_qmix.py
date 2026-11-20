@@ -62,6 +62,7 @@ class BatchedQMIX:
             require_monitored_cuda()
         info = {key: getattr(world_type, key) for key in ("n_agents", "n_actions", "state_shape", "obs_shape")}
         cfg = self.cfg = SimpleNamespace(**method_config)
+        cfg.bootstrap_at_time_limit = getattr(cfg, 'bootstrap_at_time_limit', True)
         if (cfg.name, cfg.learner, cfg.mixer, cfg.action_selector) != (
                 'qmix', 'q_learner', 'qmix', 'epsilon_greedy'):
             raise ValueError("This trainer requires the epsilon-greedy QMIX learner")
@@ -112,7 +113,7 @@ class BatchedQMIX:
     def _collect(self, world, layout, epsilon):
         world.reset(layout=layout)
         trajectory = {k: [] for k in ('obs', 'state', 'available', 'actions', 'reward',
-                                      'terminated', 'filled')}
+                                      'terminated', 'truncated', 'filled')}
         available = world.avail_actions()
         last = torch.zeros_like(available, dtype=torch.float32)
         hidden = None
@@ -124,10 +125,11 @@ class BatchedQMIX:
             actions, hidden = select_actions(self.actor, self.spec, obs, available, hidden, last,
                                              epsilon=epsilon, generator=self.action_rng)
             active = ~(world.terminated | world.truncated)
-            reward, terminated, _ = world.step(actions)
+            reward, terminated, truncated = world.step(actions)
             trajectory['actions'].append(actions)
             trajectory['reward'].append(reward)
             trajectory['terminated'].append(terminated.clone())
+            trajectory['truncated'].append(truncated.clone())
             trajectory['filled'].append(active)
             last = F.one_hot(actions, self.spec.n_actions).float()
             available = world.avail_actions()
@@ -147,7 +149,10 @@ class BatchedQMIX:
             next_actions = q[:, 1:].detach().masked_fill(~sample['available'][:, 1:], -torch.inf).argmax(-1)
             next_q = self.target(inputs)[:, 1:].gather(-1, next_actions.unsqueeze(-1)).squeeze(-1)
             next_values = self.target_mixer(next_q, sample['state'][:, 1:]).squeeze(-1)
-            targets = sample['reward'] + self.cfg.gamma * (~sample['terminated']) * next_values
+            end = sample['terminated']
+            if not self.cfg.bootstrap_at_time_limit:
+                end = end | sample['truncated']
+            targets = sample['reward'] + self.cfg.gamma * (~end) * next_values
         valid = sample['filled']
         loss = ((values - targets).square() * valid).sum() / valid.sum()
         self.optimizer.zero_grad(set_to_none=True)

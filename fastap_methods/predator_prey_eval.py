@@ -30,7 +30,8 @@ def validate_pp(actor, spec, *, n_maps, seed, device):
                 trained=dict(mean_return=float(values.mean()), any_tag_rate=float((values > 0).mean())))
 
 
-def _contacts(seed, factories):
+def rollout_contacts(seed, factories):
+    """Count each predator's contacts in one scalar episode from the specified start."""
     game = PredatorPreyWorld(seed=seed)
     try:
         game.reset()
@@ -80,7 +81,7 @@ def evaluate_pp_cases(cases, seeds):
             if mate.spec != ego.spec:
                 raise ValueError("The PP teammate must have the same actor specification as its partners")
             factories.append(mate.policy_factory(2))
-        counts = np.stack([_contacts(seed, factories) for seed in seeds])
+        counts = np.stack([rollout_contacts(seed, factories) for seed in seeds])
         totals = counts.sum(axis=1)
         returns[case] = (10 * totals).tolist()
         per_role[case] = counts.tolist()
