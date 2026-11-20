@@ -1,4 +1,4 @@
-"""Build a fixed cohort of independent LBF or PP QMIX teammates and evaluate cross-play."""
+"""Build a fixed cohort of independent QMIX teammates and evaluate cross-play."""
 
 import argparse
 import fcntl
@@ -15,9 +15,12 @@ from time import sleep
 from gpu2_monitor import ROOT, write_json
 
 
-BASE_RUNS = {"lbf": "outputs/lbf_single_T1_full_01", "pp": "outputs/pp_single_T1_horizon25_01"}
+BASE_RUNS = {"lbf": "outputs/lbf_single_T1_full_01", "pp": "outputs/pp_single_T1_horizon25_01",
+             "cn": "outputs/cn_single_T1_horizon25_01"}
 EVIDENCE = {"lbf": ("evidence_for_any_food", "evidence_for_full_completion"),
-            "pp": ("evidence_for_teammate", "evidence_for_team")}
+            "pp": ("evidence_for_teammate", "evidence_for_team"),
+            "cn": ("evidence_for_teammate", "evidence_for_team")}
+CROSSPLAY_FIRST_SEED = {"lbf": 870000, "pp": 1510000, "cn": 2010000}
 
 
 def read(path):
@@ -109,9 +112,14 @@ def generate(pool, base, size):
     protocol = dict(scene=scene, target_size=size, teammate_slot=2, base_run=str(base.relative_to(ROOT)),
                     training_seeds=seeds, per_member_steps=cfg["total_step_budget"], eval_maps=cfg["eval_maps"],
                     num_envs=cfg["num_envs"], member_test_seed=cfg["heldout_seed"],
-                    crossplay_first_seed=870000, crossplay_maps=256)
-    if scene == "pp":
-        protocol.update(crossplay_first_seed=1510000, bootstrap_at_time_limit=cfg["method"].get("bootstrap_at_time_limit", True))
+                    crossplay_first_seed=CROSSPLAY_FIRST_SEED[scene], crossplay_maps=256)
+    if scene in ("pp", "cn"):
+        protocol["bootstrap_at_time_limit"] = cfg["method"].get("bootstrap_at_time_limit", True)
+    if scene == "cn":
+        reference_protocol = read(base / "protocol.json")
+        for key in ("episode_limit", "n_egos", "n_teammates", "n_landmarks", "collision_penalty",
+                    "primary_endpoint", "secondary_endpoint"):
+            protocol[key] = reference_protocol[key]
     previous = pool / "protocol.json"
     if previous.is_file() and read(previous) != protocol:
         raise ValueError("Existing pool has a different protocol")
@@ -127,6 +135,8 @@ def generate(pool, base, size):
                                                   finished=len(manifest["members"]), target=size))
             print(f"Starting {current}, seed {seed}", flush=True)
             run = base if number == 1 else train_member(pool, current, seed, cfg)
+            if scene == "cn" and read(run / "protocol.json") != {**reference_protocol, "training_seed": seed}:
+                raise ValueError(f"CN training or evaluation protocol differs from the reference in {run}")
             entry = publish(pool, current, run, seed, cfg)
             if number <= len(manifest["members"]):
                 if entry != manifest["members"][number - 1]:

@@ -24,7 +24,7 @@ def load_yaml(path):
 def pool_paths(manifest_path, scene):
     manifest = json.loads(manifest_path.read_text())
     if (manifest.get("format"), manifest.get("scene"), manifest.get("role")) != (
-            f"{scene}-teammate-pool-v1", scene, 2) or scene not in ("lbf", "pp"):
+            f"{scene}-teammate-pool-v1", scene, 2) or scene not in ("lbf", "pp", "cn"):
         raise ValueError("Incompatible teammate pool for this scene")
     paths = []
     for member in manifest["members"]:

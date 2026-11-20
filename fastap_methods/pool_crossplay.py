@@ -6,8 +6,10 @@ from torch.nn import functional as F
 
 from fastap_agents import load_frozen_agent
 from fastap_agents.batched import select_actions
+from fastap_scenarios import make_env
 from fastap_scenarios.foraging import ForagingWorld
 from fastap_scenarios.predator_prey import PredatorPreyWorld
+from fastap_scenarios.torch_cooperative_navigation import TorchCooperativeNavigation
 from fastap_scenarios.torch_foraging import TorchForaging
 from fastap_scenarios.torch_predator_prey import TorchPredatorPrey
 
@@ -40,6 +42,22 @@ def _pp_starts(first_seed, count):
     return dict(positions=np.asarray(positions), velocity=np.asarray(velocity))
 
 
+def _cn_starts(first_seed, count):
+    positions, velocity, landmarks = [], [], []
+    for seed in range(first_seed, first_seed + count):
+        # Use the same map per seed as the independent ego-interface evaluation.
+        env = make_env("cn", control="team", n_teammates=1, seed=seed)
+        try:
+            env.set_test_mode(True)
+            env.reset()
+            positions.append([a.position for a in env.world.agents])
+            velocity.append([a.velocity for a in env.world.agents])
+            landmarks.append([landmark.position for landmark in env.world.landmarks])
+        finally:
+            env.close()
+    return dict(positions=np.asarray(positions), velocity=np.asarray(velocity), landmarks=np.asarray(landmarks))
+
+
 def evaluate_pool(directory, members, first_seed, n_maps):
     """Rows supply slots 0 and 1. Columns supply slot 2; policies are frozen and greedy."""
     previous_threads = torch.get_num_threads()
@@ -56,12 +74,16 @@ def _evaluate(directory, members, first_seed, n_maps):
     if not agents or any(a.spec != agents[0].spec for a in agents):
         raise ValueError("Expected a nonempty pool with matching actor specifications")
     spec = agents[0].spec
-    if spec.scene_key not in ("lbf", "pp") or (spec.n_agents, spec.control) != (3, "team"):
-        raise ValueError("Expected frozen three-player LBF or PP teams")
+    if spec.scene_key not in ("lbf", "pp", "cn") or (spec.n_agents, spec.control) != (3, "team"):
+        raise ValueError("Expected frozen three-player LBF, PP or CN teams")
     pp = spec.scene_key == "pp"
+    cn = spec.scene_key == "cn"
     if pp:
         maps = _pp_starts(first_seed, n_maps)
         world = TorchPredatorPrey(n_maps, "cpu", seed=first_seed)
+    elif cn:
+        maps = _cn_starts(first_seed, n_maps)
+        world = TorchCooperativeNavigation(n_maps, "cpu", seed=first_seed)
     else:
         maps = _initial_boards(first_seed, n_maps)
         world = TorchForaging(n_maps, "cpu", seed=first_seed)
@@ -76,6 +98,9 @@ def _evaluate(directory, members, first_seed, n_maps):
             returns = torch.zeros(n_maps)
             if pp:
                 contacts = torch.zeros((n_maps, world.n_agents), dtype=torch.long)
+            elif cn:
+                distance = torch.zeros(n_maps, dtype=torch.float64)
+                collisions = torch.zeros(n_maps, dtype=torch.long)
             for _ in range(world.episode_limit):
                 obs, available = world.observations(), world.avail_actions()
                 actions, ego_hidden = select_actions(ego.model, ego.spec, obs, available, ego_hidden, previous)
@@ -89,12 +114,18 @@ def _evaluate(directory, members, first_seed, n_maps):
                 returns += reward
                 if pp:
                     contacts += world.last_contacts
+                elif cn:
+                    distance += world.distance_sum
+                    collisions += world.collisions
                 previous = F.one_hot(actions, world.n_actions).float()
             score = dict(mean_return=returns.mean().item())
             if pp:
                 score.update(any_tag=int((returns > 0).sum()),
                              teammate_mean_contacts=contacts[:, 2].float().mean().item(),
                              multiple_predators_tagged=int(((contacts > 0).sum(1) >= 2).sum()))
+            elif cn:
+                score.update(mean_landmark_distance_sum_per_step=distance.mean().item() / world.episode_limit,
+                             mean_pair_collisions_per_episode=collisions.double().mean().item())
             else:
                 score.update(any_food=int((returns > 1/6).sum()), all_food=int(world.terminated.sum()))
             row.append(score)
