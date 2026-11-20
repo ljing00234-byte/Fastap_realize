@@ -1,0 +1,12 @@
+# CPython 3.9 on Linux x86_64. PyPI's torch 2.8.0 wheel includes CUDA 12.8 support.
+torch==2.8.0
+numpy==1.23.5
+gym==0.21.0
+lbforaging==1.0.15
+pyglet==1.5.31
+PyYAML==6.0.2
+sacred==0.8.7
+protobuf==3.19.5
+pysc2==3.0.0
+s2clientprotocol==4.10.1.75800.0
+SMAC @ git+https://github.com/oxwhirl/smac.git@47426ebb3e45a818b0c52d84e649a50826787d55

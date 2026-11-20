@@ -4,6 +4,7 @@ venv/
 envs/
 .cache/
 .conda/
+third_party/epymarl/
 tmp/
 .tmp/
 __pycache__/
