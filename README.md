@@ -31,6 +31,17 @@ python3 -B scripts/run_baseline.py outputs/demo_ego --scene lbf --control ego --
 
 GPU 训练通过同一监控入口绑定物理 GPU 2。输出目录内，`config.json` 记录所选场景、agent、方法与队友来源，`metrics.jsonl` 记录训练和评估指标，`summary.json` 给出最终检查点路径。每个检查点包含局部策略、角色元数据、混合网络和优化器；执行冻结策略只需 `agent.th` 和 `agent.json`。
 
+### 第一名队友及其 best response
+
+在 LBF 中先用 QMIX 训练三人团队，从验证回报最高的检查点取出第 3 个角色作为队友 T1。固定 T1 的权重后，从头训练两个 ego，使它们与 T1 配合时的团队回报尽可能高。这两个 ego 的联合策略是本实验对 best response 的近似。
+
+```bash
+source scripts/epymarl-env.sh
+envs/epymarl/bin/python scripts/train_teammate_response.py outputs/lbf_teammate_A
+```
+
+两阶段默认各 20 万步，训练种子分别为 101 和 202。这是第一组实验的预算。每阶段在相同的 64 张验证地图上选择检查点，最后另用 128 张留出地图比较「T1 + 原搭档」「T1 + 新训练的 ego」和「随机队友 + 原搭档」。`status.json` 标明当前阶段和已选权重，`heldout.json` 保存最终回报与成功采食率。复跑时使用新的输出目录。
+
 ## 项目存储
 
 所有项目文件均存放在 `/mnt/ssd/users/linhui/projects/Fastap_realize/` 下，包括虚拟环境、依赖缓存、模型、数据、临时文件和训练输出。安装、下载和训练前必须显式检查相关写入路径，避免使用 `/home/linhui/` 或系统盘默认缓存目录。
