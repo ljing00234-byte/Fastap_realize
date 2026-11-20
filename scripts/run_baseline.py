@@ -24,7 +24,7 @@ def load_yaml(path):
 def pool_paths(manifest_path, scene):
     manifest = json.loads(manifest_path.read_text())
     if (manifest.get("format"), manifest.get("scene"), manifest.get("role")) != (
-            "lbf-teammate-pool-v1", scene, 2):
+            f"{scene}-teammate-pool-v1", scene, 2) or scene not in ("lbf", "pp"):
         raise ValueError("Incompatible teammate pool for this scene")
     paths = []
     for member in manifest["members"]:
@@ -112,7 +112,7 @@ def main():
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--teammate-checkpoint", action="append", default=[], type=project_path,
                         help="frozen all-team checkpoint directory; repeat to build a pool")
-    source.add_argument("--teammate-pool", type=project_path, help="pool.json with frozen LBF teammate policies")
+    source.add_argument("--teammate-pool", type=project_path, help="pool.json with frozen teammate policies for this scene")
     parser.add_argument("--switch-interval", type=int, nargs=2, metavar=("MIN", "MAX"),
                         help="enable teammate resampling during ego evaluation")
     parser.add_argument("--seed", type=int, default=7)

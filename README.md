@@ -94,6 +94,15 @@ envs/epymarl/bin/python -B scripts/generate_lbf_pool.py outputs/lbf_teammate_poo
 
 全体完成后，`crossplay.json` 记录在另外 256 张相同地图上互换队友的成绩，每行固定一对原搭档，每列更换第 3 个角色。文件也记录了各个队友在 T1 原团队同一批观测及动作历史上选择不同动作的比例。
 
+### 生成 PP 队友集合
+
+```bash
+source scripts/epymarl-env.sh
+envs/epymarl/bin/python -B scripts/generate_teammate_pool.py outputs/pp_teammate_pool_01 --scene pp --size 8
+```
+
+T1 复用通过检验的 25 步终止模型。T2–T8 使用不同种子，各训练 200 万步，第 25 步的目标等于当步奖励。每名成员在相同的 1,024 个开局上与随机队友、未训练队友对照。`pool.json` 保留所有预定种子的权重路径、测试得分和检验结论，供 `--scene pp --teammate-pool` 加载。全部完成后，在另外 256 个开局上评估每对搭档与每名队友的组合，接触局数、平均团队回报和动作差异写入 `crossplay.json`。
+
 ## 项目存储
 
 所有项目文件均存放在 `/mnt/ssd/users/linhui/projects/Fastap_realize/` 下，包括虚拟环境、依赖缓存、模型、数据、临时文件和训练输出。安装、下载和训练前必须显式检查相关写入路径，避免使用 `/home/linhui/` 或系统盘默认缓存目录。
