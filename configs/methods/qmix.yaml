@@ -1,0 +1,26 @@
+# Vanilla QMIX. Environment rewards are used directly in the TD target.
+name: qmix
+learner: q_learner
+mixer: qmix
+mixing_embed_dim: 32
+hypernet_layers: 2
+hypernet_embed: 64
+gamma: 0.99
+lr: 0.0005
+grad_norm_clip: 10
+double_q: true
+standardise_returns: false
+standardise_rewards: false
+target_update_interval_or_tau: 200
+action_selector: epsilon_greedy
+epsilon_start: 1.0
+epsilon_finish: 0.05
+epsilon_anneal_time: 50000
+evaluation_epsilon: 0.0
+batch_size: 32
+buffer_size: 5000
+# End of the three benchmark learning curves in Fastap (2M environment steps).
+t_max: 2000000
+test_nepisode: 20
+test_interval: 2000
+save_model_interval: 50000

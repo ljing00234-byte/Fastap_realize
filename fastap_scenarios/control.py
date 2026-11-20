@@ -123,7 +123,9 @@ class OpenTeamEnv(_AgentView):
     def _sample_group(self, step):
         # Algorithm 3 resamples from the whole pool, including the current group.
         group = self.groups[self._stream.group_rng.integers(len(self.groups))]
-        self._policies = tuple(factory() for factory in group.policies)
+        # A recurrent teammate that stays in the same group keeps its trajectory.
+        if step == 0 or group.name != self.group_name:
+            self._policies = tuple(factory() for factory in group.policies)
         self.group_name = group.name
         self.events.append(dict(step=step, group=group.name, n_teammates=self.n_teammates))
 

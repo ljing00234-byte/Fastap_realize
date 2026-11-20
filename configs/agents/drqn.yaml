@@ -1,0 +1,8 @@
+# Shared local Q network, with separate history for each active role.
+agent: rnn
+mac: basic_mac
+agent_output_type: q
+use_rnn: true
+hidden_dim: 64
+obs_agent_id: true
+obs_last_action: true

@@ -8,6 +8,29 @@
 
 [场景代码](fastap_scenarios/) · [场景配置](configs/scenarios/)
 
+## 智能体与训练方法
+
+**第一条基线是 vanilla QMIX。** 训练时，QMIX 使用全局状态将各角色的动作价值组合为团队价值；执行时，每个角色只根据自己的局部历史选择合法动作。LBF、PP 和 CN 的奖励直接来自游戏，进入回放、TD 更新和评估的都是原始团队奖励。[Fastap 论文](https://proceedings.mlr.press/v216/zhang23a.html) · [QMIX 原文](https://proceedings.mlr.press/v80/rashid18a.html)
+
+| 模块 | 输入与职责 | 扩展入口 |
+| --- | --- | --- |
+| 智能体 | 本地观测、上一步动作、原始角色编号 → 各动作的 Q 值。默认共享一个 64 维 GRU，各角色单独保存记忆 | 新网络通过 `register_agent_backend` 注册训练控制器、权重说明和冻结策略加载器。[agent 模块](fastap_agents/) · [agent 配置](configs/agents/drqn.yaml) |
+| 训练方法 | 从完整回合采样，利用全局状态、联合动作和团队奖励更新网络。默认使用单调混合网络、Double Q、经验回放和目标网络 | 新方法提供与 `train_qmix` 相同的调用入口，加入 `TRAINERS`，用方法 YAML 选择。[方法模块](fastap_methods/) · [QMIX 配置](configs/methods/qmix.yaml) |
+
+默认折扣为 0.99，批量为 32 个回合，学习率为 0.0005，每 200 次优化更新同步目标网络。正式配置的 200 万个环境步对应原文基准学习曲线的横轴范围。原文没有单列 vanilla QMIX 的全部网络开关，本实现显式启用 GRU 和上一动作输入，并关闭 EPyMARL 的奖励标准化。队友生成的训练步数可用 `--steps` 单独指定。[论文补充材料](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf)
+
+下面两条命令演示 LBF 的完整接口。第一条训练三人团队；第二条从其检查点加载第 3 个角色作为冻结队友，训练两个 ego。示例使用 125 步的小批量验证配置，每次运行使用新的输出目录。
+
+```bash
+source scripts/epymarl-env.sh
+python3 -B scripts/run_baseline.py outputs/demo_team --scene lbf --control team --teammates 1 --smoke
+python3 -B scripts/run_baseline.py outputs/demo_ego --scene lbf --control ego --teammate-checkpoint outputs/demo_team/checkpoints/125 --smoke
+```
+
+相同入口接受 `--scene pp` 或 `--scene cn`。用 `--agent-config` 和 `--method-config` 分别选择网络配置与训练配置。重复传入 `--teammate-checkpoint` 可组成队友池。训练时每局固定一组，ego 评估可加 `--switch-interval 5 8` 启用回合内重抽。同组重抽延续队友记忆，实际换组或新回合重新初始化。省略检查点时使用该游戏的规则队友。冻结队友需来自同一游戏的全队训练。
+
+GPU 训练通过同一监控入口绑定物理 GPU 2。输出目录内，`config.json` 记录所选场景、agent、方法与队友来源，`metrics.jsonl` 记录训练和评估指标，`summary.json` 给出最终检查点路径。每个检查点包含局部策略、角色元数据、混合网络和优化器；执行冻结策略只需 `agent.th` 和 `agent.json`。
+
 ## 项目存储
 
 所有项目文件均存放在 `/mnt/ssd/users/linhui/projects/Fastap_realize/` 下，包括虚拟环境、依赖缓存、模型、数据、临时文件和训练输出。安装、下载和训练前必须显式检查相关写入路径，避免使用 `/home/linhui/` 或系统盘默认缓存目录。

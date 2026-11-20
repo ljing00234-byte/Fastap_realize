@@ -79,6 +79,37 @@ class ForagingWorldTests(unittest.TestCase):
 
 
 class RoleAndScheduleTests(unittest.TestCase):
+    def test_recurrent_teammate_resets_on_group_change_and_episode_start(self):
+        history_lengths = []
+
+        def fresh_policy():
+            steps = 0
+
+            def act(obs, available, rng):
+                nonlocal steps
+                steps += 1
+                history_lengths.append(steps)
+                return 0
+
+            return act
+
+        groups = [TeammateGroup("a", (fresh_policy,)), TeammateGroup("b", (fresh_policy,))]
+        env = FastapLBFEnv(seed=5, teammate_groups=groups, switch_interval=(1, 1))
+        self.addCleanup(env.close)
+        env.set_test_mode(True)
+        with patch.object(env._streams[1], "group_rng") as group_rng:
+            # Start with a, draw a again, switch to b and keep drawing b.
+            group_rng.integers.side_effect = [0, 0] + [1] * (env.episode_limit + 2)
+            env.reset()
+            for _ in range(env.episode_limit):
+                _, _, info = env.step([0, 0])
+            self.assertEqual(history_lengths, [1, 2] + list(range(1, 24)))
+            self.assertEqual(info["teammate_resamples"], 24)
+            self.assertEqual(info["teammate_group_changes"], 1)
+            env.reset()
+            env.step([0, 0])
+            self.assertEqual(history_lengths[-1], 1)
+
     def test_fixed_evaluation_leaves_next_training_episode_unchanged(self):
         env = FastapLBFEnv(seed=20, switch_interval=None)
         control = FastapLBFEnv(seed=20, switch_interval=None)
