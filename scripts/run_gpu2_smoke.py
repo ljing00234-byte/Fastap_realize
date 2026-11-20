@@ -114,7 +114,7 @@ def stop(child):
         child.wait()
 
 
-def launch(run_dir, lock):
+def launch(run_dir, lock, scene):
     python = ROOT / "envs/epymarl/bin/python"
     if not python.is_file() or os.environ.get("FASTAP_ROOT") != str(ROOT):
         raise RuntimeError("Set up envs/epymarl and source scripts/epymarl-env.sh first")
@@ -146,7 +146,7 @@ def launch(run_dir, lock):
               "reserve_mib": RESERVE, "sampled_process_peak_mib": 0,
               "sampled_project_peak_mib": used_before, "samples": 0}
     write_json(run_dir / "monitor.json", report)
-    cmd = [str(python), str(ROOT / "scripts/qmix_lbf_smoke.py"), str(run_dir)]
+    cmd = [str(python), str(ROOT / "scripts/qmix_lbf_smoke.py"), str(run_dir), "--scene", scene]
     child = subprocess.Popen(cmd, cwd=ROOT, start_new_session=True,
                              env={**os.environ, "CUDA_VISIBLE_DEVICES": state["uuid"]})
     report["pid"] = child.pid
@@ -179,7 +179,9 @@ def launch(run_dir, lock):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path, help="fresh directory inside project outputs/")
-    run_dir = parser.parse_args().run_dir.resolve()
+    parser.add_argument("--scene", choices=("upstream", "fastap"), default="upstream")
+    args = parser.parse_args()
+    run_dir = args.run_dir.resolve()
     if OUTPUTS not in run_dir.parents:
         parser.error("run_dir must be inside project outputs/")
     OUTPUTS.mkdir(exist_ok=True)
@@ -188,7 +190,7 @@ def main():
         # launch can then count any of this run's expected peak still pending.
         fcntl.flock(lock, fcntl.LOCK_EX)
         signal.signal(signal.SIGTERM, interrupt)
-        launch(run_dir, lock)
+        launch(run_dir, lock, args.scene)
 
 
 def interrupt(signum, frame):

@@ -1,0 +1,6 @@
+env: fastap_lbf
+runner: fastap_episode
+env_args:
+  key: fastap-lbf-6x6
+  # Inclusive waiting times for non-stationary evaluation; null for stationary.
+  switch_interval: [5, 8]

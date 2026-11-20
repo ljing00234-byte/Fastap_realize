@@ -29,12 +29,18 @@ def gpu_uuid():
     return uuid
 
 
-def experiment_config(run_dir):
+def experiment_config(run_dir, scene):
     config = {}
-    for path in ["default.yaml", "envs/gymma.yaml", "algs/qmix.yaml"]:
+    for path in ["default.yaml", "algs/qmix.yaml"]:
         with (SRC / "config" / path).open() as stream:
             config.update(yaml.safe_load(stream))
-    config["env_args"].update(key=ENV_KEY, time_limit=25)
+    if scene == "fastap":
+        with (PROJECT / "configs/fastap_lbf.yaml").open() as stream:
+            config.update(yaml.safe_load(stream))
+    else:
+        with (SRC / "config/envs/gymma.yaml").open() as stream:
+            config.update(yaml.safe_load(stream))
+        config["env_args"].update(key=ENV_KEY, time_limit=25)
     config.update(
         seed=7, use_cuda=True, buffer_cpu_only=True, batch_size=2, buffer_size=8,
         t_max=224, test_nepisode=2, test_interval=50, log_interval=1,
@@ -75,7 +81,9 @@ def verify_run(run_dir, info):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
-    run_dir = parser.parse_args().run_dir.resolve()
+    parser.add_argument("--scene", choices=("upstream", "fastap"), default="upstream")
+    args = parser.parse_args()
+    run_dir = args.run_dir.resolve()
     if PROJECT / "outputs" not in run_dir.parents:
         parser.error("Choose a dedicated run directory inside project outputs/.")
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -84,22 +92,38 @@ def main():
     uuid = gpu_uuid()
     torch.set_num_threads(1)
     sys.path.insert(0, str(SRC))
+    if args.scene == "fastap":
+        sys.path.insert(0, str(PROJECT))
+        from fastap_lbf.epymarl import register_epymarl
+        register_epymarl()
     from main import ex
     from sacred.observers import FileStorageObserver
 
-    config = experiment_config(run_dir)
+    config = experiment_config(run_dir, args.scene)
     ex.add_config(config)
     ex.observers.append(FileStorageObserver.create(str(run_dir / "sacred")))
     run = ex.run()
     if run.status != "COMPLETED":
         raise RuntimeError(f"Sacred reported {run.status}.")
     summary = verify_run(run_dir, run.info)
+    if args.scene == "fastap":
+        train_resamples = run.info["teammate_resamples_mean"]
+        eval_resamples = run.info["test_teammate_resamples_mean"]
+        if any(train_resamples):
+            raise RuntimeError("A teammate group was resampled in a training episode.")
+        if config["env_args"]["switch_interval"] and not any(eval_resamples):
+            raise RuntimeError("Switching evaluation completed without a teammate draw.")
+        summary.update(
+            train_resamples_per_episode=float(train_resamples[-1]),
+            last_test_resamples_per_episode=float(eval_resamples[-1]),
+            last_test_group_changes_per_episode=float(run.info["test_teammate_group_changes_mean"][-1]),
+        )
     peak = torch.cuda.max_memory_allocated()
     if peak <= 0:
         raise RuntimeError("PyTorch did not record any GPU tensor allocations.")
     summary.update(
         gpu_uuid=uuid, logical_device="cuda:0", torch_peak_allocated_bytes=peak,
-        seed=config["seed"], env_key=ENV_KEY, use_rnn=config["use_rnn"],
+        seed=config["seed"], env_key=config["env_args"]["key"], use_rnn=config["use_rnn"],
     )
     report = json.dumps(summary, indent=2, allow_nan=False)
     (run_dir / "summary.json").write_text(report + "\n")
