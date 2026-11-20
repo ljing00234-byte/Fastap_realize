@@ -1,0 +1,36 @@
+# Local environments, caches, and temporary files
+.venv/
+venv/
+envs/
+.cache/
+.conda/
+tmp/
+.tmp/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Models, datasets, and training artifacts
+models/
+data/
+datasets/
+checkpoints/
+outputs/
+runs/
+logs/
+wandb/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+
+# Credentials and local application state
+.env
+.env.*
+!.env.example
+.aws/
+.codex/
+.agents/
+*.pem
+*.key
