@@ -163,14 +163,19 @@ def main():
                         metavar=("ADJACENT", "APPROACH", "RANDOM"))
     parser.add_argument("--eval-maps", type=int, default=128)
     parser.add_argument("--heldout-seed", type=int, default=200000)
-    parser.add_argument("--total-steps", type=int, default=200000,
+    parser.add_argument("--total-steps", type=int,
                         help="aggregate training transitions across all stages (rounded up to a rollout batch)")
-    parser.add_argument("--benchmark-only", action="store_true",
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--benchmark-only", action="store_true",
                         help="time the same training workload with 1, 8 and 32 parallel boards")
+    mode.add_argument("--single-teammate", action="store_true",
+                      help="train one team on standard random LBF for 2M steps and independently test slot 2")
     parser.add_argument("--seed", type=int, default=101)
     parser.add_argument("--expected-peak-mib", type=int, default=BASELINE_PEAK)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.total_steps is None:
+        args.total_steps = 2000000 if args.single_teammate else 200000
     args.run_dir = (ROOT / args.run_dir).resolve()
     if ROOT / "outputs" not in args.run_dir.parents or min(args.num_envs, args.eval_maps, args.total_steps,
                                                           *args.stage_steps) < 1:
@@ -197,11 +202,17 @@ def main():
     def config(name):
         return yaml.safe_load((ROOT / "configs" / name).read_text())
     agent, method = config("agents/drqn.yaml"), config("methods/qmix.yaml")
-    write_json(args.run_dir / "config.json",
-               dict(scene="lbf", gpu_uuid=uuid, device="cuda:0", num_envs=args.num_envs,
-                    seed=args.seed, stage_step_budgets=args.stage_steps, total_step_budget=args.total_steps,
-                    eval_maps=args.eval_maps, heldout_seed=args.heldout_seed, benchmark_only=args.benchmark_only,
-                    agent=agent, method=method))
+    settings = dict(scene="lbf", gpu_uuid=uuid, device="cuda:0", num_envs=args.num_envs,
+                    seed=args.seed, total_step_budget=args.total_steps, eval_maps=args.eval_maps,
+                    heldout_seed=args.heldout_seed, benchmark_only=args.benchmark_only,
+                    single_teammate=args.single_teammate, agent=agent, method=method)
+    if not args.single_teammate:
+        settings["stage_step_budgets"] = args.stage_steps
+    write_json(args.run_dir / "config.json", settings)
+    if args.single_teammate:
+        from fastap_methods.single_teammate import run_single_team
+        run_single_team(args, agent, method, "cuda:0", check_parity, write_json)
+        return
     run_course(args, agent, method, "cuda:0")
 
 

@@ -55,6 +55,17 @@ envs/epymarl/bin/python -B scripts/train_lbf_cooperation.py outputs/cooperation_
 
 邻格阶段要求首步同步采集率至少 80%，并通过成对单侧检验（p < 0.05）。后两阶段要求至少采到一份的成功率显著优于随机队友，且平均回报更高。报告也给出三份全部采完的比例。运行进度见输出目录的 `status.json`，采样与梯度更新时间见 `metrics.jsonl`，最终选中模型在三个阶段的独立成绩见 `heldout.json`。在新的输出目录使用 `--benchmark-only` 可单独比较 1、8、32 个并行环境的吞吐。
 
+### 生成和检验一名 LBF 队友
+
+在标准随机地图上用 vanilla QMIX 从头联合训练三个角色，默认训练 200 万个有效环境步。每 5 万步在固定验证集上按三份采完率、平均回报的顺序选择一个检查点。运行命令中的输出目录需为空。
+
+```bash
+source scripts/epymarl-env.sh
+envs/epymarl/bin/python -B scripts/train_lbf_cooperation.py outputs/single_T1 --single-teammate --num-envs 32 --eval-maps 256 --heldout-seed 720000
+```
+
+输出目录的 `T1/` 含可直接加载的权重，使用 `load_frozen_agent(path).policy_factory(2)` 取得第 3 个角色。选定后在原版 CPU 环境的 1,024 张独立地图上固定两名搭档，对照训练后的 T1、合法随机动作和初始 T1，并记录初始整队的成绩。`protocol.json` 记录事先设定的判据，`heldout.json` 记录逐图回报、至少采到一份和三份全采完的配对比较。
+
 ## 项目存储
 
 所有项目文件均存放在 `/mnt/ssd/users/linhui/projects/Fastap_realize/` 下，包括虚拟环境、依赖缓存、模型、数据、临时文件和训练输出。安装、下载和训练前必须显式检查相关写入路径，避免使用 `/home/linhui/` 或系统盘默认缓存目录。
