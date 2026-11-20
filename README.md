@@ -81,6 +81,17 @@ envs/epymarl/bin/python -B scripts/train_lbf_cooperation.py outputs/pp_single_T1
 
 两组完成后运行 `envs/epymarl/bin/python -B scripts/compare_pp_time_limit.py 原组目录 对照组目录`。脚本核对配置及初始权重，在 1,024 个新开局复测两组策略，并输出同图回报差的 95% 区间。
 
+### 生成和检验一名 CN 队友
+
+```bash
+source scripts/epymarl-env.sh
+envs/epymarl/bin/python -B scripts/train_lbf_cooperation.py outputs/cn_single_T1_horizon25_01 --scene cn --single-teammate --num-envs 32 --eval-maps 256 --heldout-seed 1810000 --no-bootstrap-at-time-limit
+```
+
+单队友阵容有两名可控智能体、一名队友和四个地标。QMIX 训练 200 万步，每局 25 步，按验证集平均回报选择模型。每步对四个地标分别计算最近智能体的距离，团队奖励为距离和的负值，每对碰撞的智能体再扣 1 分。
+
+独立测试通过双智能体接口加载 `T1/`，在同一批 1,024 个开局上比较已训练、随机和未训练的队友。`heldout.json` 包含回报、地标距离和碰撞次数。`compatibility.json` 记录 GPU 与单局环境的逐步对照，以及导出的队友在两个控制接口中的动作、状态和回报一致性。
+
 ### 生成 LBF 队友集合
 
 默认生成 8 个单队友策略。T1 复用已验证的权重，其余成员使用不同随机种子，各在物理 GPU 2 上训练 200 万步。每张棋盘上有两名搭档和一名队友。模型、环境、奖励和用于选检查点的验证集与 T1 相同。

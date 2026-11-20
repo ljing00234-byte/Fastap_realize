@@ -3,7 +3,8 @@
 import numpy as np
 import torch
 
-from .particle import MOVES, _CONTACT_FORCE, _CONTACT_MARGIN, _DAMPING, _DT
+from .particle import MOVES, _DAMPING, _DT
+from .torch_particle import ParticleContacts
 from .predator_prey import PredatorPreyWorld
 
 
@@ -25,11 +26,7 @@ class TorchPredatorPrey:
         self.acceleration = self.moves.new_tensor([3, 3, 3, 4]).view(1, 4, 1)
         self.max_speed = self.moves.new_tensor([1, 1, 1, 1.3]).view(1, 4, 1)
         radii = self.moves.new_tensor([.075, .075, .075, .05, .2, .2])
-        self.touch_distance = radii[:4, None] + radii[None, :]
-        self.interact = ~torch.eye(4, 6, dtype=torch.bool, device=device)
-        # The scalar pair loop uses (+x) for the lower-index body at exact coincidence.
-        signs = torch.where(torch.arange(4, device=device)[:, None] < torch.arange(6, device=device), 1, -1)
-        self.coincident_normal = torch.stack((signs, torch.zeros_like(signs)), dim=-1)
+        self.contacts = ParticleContacts(radii, movers=4)
         self.others = torch.tensor([[1, 2], [0, 2], [0, 1]], device=device)
         self.available = torch.ones(batch_size, 3, self.n_actions, dtype=torch.bool, device=device)
 
@@ -83,20 +80,14 @@ class TorchPredatorPrey:
             raise ValueError("Provide one integer action per predator and board")
         self.last_prey_action = self._prey_action()
         joint = torch.cat((actions, self.last_prey_action[:, None]), dim=1)
-        delta = self.positions[:, :4, None, :] - self.positions[:, None, :, :]
-        distance = torch.linalg.vector_norm(delta, dim=-1)
-        normal = delta / distance.masked_fill(distance == 0, 1).unsqueeze(-1)
-        normal = torch.where((distance == 0).unsqueeze(-1), self.coincident_normal, normal)
-        penetration = torch.logaddexp(distance.new_zeros(()), (self.touch_distance - distance) / _CONTACT_MARGIN)
-        contact = (_CONTACT_FORCE * _CONTACT_MARGIN * penetration * self.interact).unsqueeze(-1) * normal
         moves = self.moves.index_select(0, joint.flatten()).reshape(self.batch_size, 4, 2)
-        force = self.acceleration * moves + contact.sum(2)
+        force = self.acceleration * moves + self.contacts.forces(self.positions)
         velocity = (1 - _DAMPING) * self.velocity + _DT * force
         speed = torch.linalg.vector_norm(velocity, dim=-1, keepdim=True).clamp_min(1e-15)
         self.velocity = velocity * (self.max_speed / speed).clamp_max(1)
         self.positions[:, :4] += _DT * self.velocity
         contacts = torch.linalg.vector_norm(self.positions[:, :3] - self.positions[:, 3:4], dim=-1)
-        self.last_contacts = contacts < self.touch_distance[:3, 3]
+        self.last_contacts = contacts < self.contacts.touch_distance[:3, 3]
         self.steps += 1
         if self.steps == self.episode_limit:
             self.truncated = torch.ones_like(self.truncated)

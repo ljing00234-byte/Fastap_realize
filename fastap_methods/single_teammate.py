@@ -12,6 +12,9 @@ from .cooperation_validation import evaluate_cooperation
 from .response_eval import evaluate_pair
 from .batched_qmix import BatchedQMIX
 from .predator_prey_eval import evaluate_pp_cases, validate_pp
+from .cooperative_navigation_eval import check_cn_adapter, evaluate_cn_cases, validate_cn
+from fastap_scenarios.cooperative_navigation import DEFAULT_COLLISION_PENALTY
+from fastap_scenarios.torch_cooperative_navigation import TorchCooperativeNavigation
 from fastap_scenarios.torch_foraging import TorchForaging
 from fastap_scenarios.torch_predator_prey import TorchPredatorPrey
 
@@ -50,9 +53,10 @@ def independent_test(directory, selected, seeds, *, scene="lbf"):
         "initial_T1": (selected, initial, False),
         "initial_team": (initial, initial, False),
     }
-    if scene == "pp":
+    if scene in ("pp", "cn"):
+        evaluate = {"pp": evaluate_pp_cases, "cn": evaluate_cn_cases}[scene]
         return dict(scene=scene, checkpoint=metadata["source"], role=2, maps=len(seeds),
-                    map_seeds=list(seeds), **evaluate_pp_cases(cases, seeds))
+                    map_seeds=list(seeds), **evaluate(cases, seeds))
     game_returns = {}
     scores = {}
     for case, (egos, teammate, random) in cases.items():
@@ -78,7 +82,8 @@ def run_single_team(args, agent_cfg, method_cfg, device, parity_check, write_jso
     n_validate = args.eval_maps
     test_seeds = range(args.heldout_seed, args.heldout_seed + 1024)
     scene = getattr(args, "scene", "lbf")
-    world_type = {"lbf": TorchForaging, "pp": TorchPredatorPrey}[scene]
+    world_type = {"lbf": TorchForaging, "pp": TorchPredatorPrey, "cn": TorchCooperativeNavigation}[scene]
+    validate_particle = {"pp": validate_pp, "cn": validate_cn}.get(scene)
     protocol = dict(scene=scene, start_distribution="random", fixed_teammate_slot=2, episode_limit=world_type.episode_limit,
                     training_steps=args.total_steps, training_seed=args.seed, num_envs=args.num_envs,
                     bootstrap_at_time_limit=method_cfg.get("bootstrap_at_time_limit", True),
@@ -94,6 +99,12 @@ def run_single_team(args, agent_cfg, method_cfg, device, parity_check, write_jso
                         prey_policy="evade_predators (fixed)", reward_per_predator_prey_contact=10,
                         primary_endpoint="mean team return over 25 steps",
                         secondary_endpoint="fraction of starts with at least one predator-prey contact",
+                        evidence="lower paired 95% bootstrap bound for mean return improvement > 0 against each T1 control",
+                        bootstrap_resamples=10000, bootstrap_seed=49711)
+    if scene == "cn":
+        protocol.update(validation_seed=1710000, selection=["mean_return"], n_egos=2, n_teammates=1,
+                        n_landmarks=4, collision_penalty=DEFAULT_COLLISION_PENALTY, primary_endpoint="mean team return over 25 steps",
+                        secondary_endpoint="nearest-agent distance sum per step and pair collisions per episode",
                         evidence="lower paired 95% bootstrap bound for mean return improvement > 0 against each T1 control",
                         bootstrap_resamples=10000, bootstrap_seed=49711)
     if set(test_seeds).intersection([args.seed, args.seed+1, args.seed+2, args.seed+10,
@@ -122,9 +133,9 @@ def run_single_team(args, agent_cfg, method_cfg, device, parity_check, write_jso
                 log.write(json.dumps(dict(kind="train", **batch), allow_nan=False) + "\n")
                 if learner.steps < next_eval and learner.steps < args.total_steps:
                     continue
-                if scene == "pp":
-                    result = validate_pp(learner.actor, learner.spec, seed=protocol["validation_seed"],
-                                         device=device, n_maps=n_validate)
+                if validate_particle is not None:
+                    result = validate_particle(learner.actor, learner.spec, seed=protocol["validation_seed"],
+                                               device=device, n_maps=n_validate)
                 else:
                     result = evaluate_cooperation(learner.actor, learner.spec, "random", split="validation",
                                                   split_seed=protocol["validation_seed"], device=device, n_maps=n_validate)
@@ -144,6 +155,9 @@ def run_single_team(args, agent_cfg, method_cfg, device, parity_check, write_jso
         update(phase="independent_test")
         results = independent_test(directory, selected, test_seeds, scene=scene)
         write_json(directory / "heldout.json", results)
+        if scene == "cn":
+            write_json(directory / "compatibility.json",
+                       dict(parity=parity, adapter=check_cn_adapter(directory / "T1", range(4200, 4212))))
         update(phase="complete", **{k: v for k, v in results.items() if k.startswith("evidence_for_")})
     except BaseException as error:
         update(phase="interrupted" if isinstance(error, KeyboardInterrupt) else "failed", error=repr(error))

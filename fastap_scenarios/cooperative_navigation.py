@@ -7,6 +7,10 @@ import numpy as np
 
 from .particle import Particle, ParticleWorld, advance, overlaps
 
+AGENT_RADIUS = 0.15
+AGENT_ACCELERATION = 5.0
+DEFAULT_COLLISION_PENALTY = 1.0
+
 
 class CooperativeNavigationWorld(ParticleWorld):
     """Two controlled agents, one or two teammates, and four fixed landmarks.
@@ -20,7 +24,7 @@ class CooperativeNavigationWorld(ParticleWorld):
     obs_shape = 21
     state_shape = 28
 
-    def __init__(self, seed=None, episode_limit=25, collision_penalty=1.0):
+    def __init__(self, seed=None, episode_limit=25, collision_penalty=DEFAULT_COLLISION_PENALTY):
         super().__init__(seed=seed, episode_limit=episode_limit)
         if not np.isfinite(collision_penalty) or collision_penalty < 0:
             raise ValueError("collision_penalty must be finite and nonnegative")
@@ -40,7 +44,7 @@ class CooperativeNavigationWorld(ParticleWorld):
         return count
 
     def _new_agent(self):
-        return Particle(self.rng.uniform(-1, 1, 2), radius=0.15)
+        return Particle(self.rng.uniform(-1, 1, 2), radius=AGENT_RADIUS, acceleration=AGENT_ACCELERATION)
 
     def reset(self, n_teammates=2):
         count = self._count(n_teammates)

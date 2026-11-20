@@ -158,7 +158,7 @@ def main():
     import shutil
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
-    parser.add_argument("--scene", choices=("lbf", "pp"), default="lbf")
+    parser.add_argument("--scene", choices=("lbf", "pp", "cn"), default="lbf")
     parser.add_argument("--num-envs", type=int, default=8)
     parser.add_argument("--stage-steps", type=int, nargs=3, default=(50000, 50000, 100000),
                         metavar=("ADJACENT", "APPROACH", "RANDOM"))
@@ -178,7 +178,7 @@ def main():
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.scene != "lbf" and not args.single_teammate:
-        parser.error("PP requires --single-teammate")
+        parser.error(f"{args.scene} requires --single-teammate")
     if args.total_steps is None:
         args.total_steps = 2000000 if args.single_teammate else 200000
     args.run_dir = (ROOT / args.run_dir).resolve()
@@ -220,6 +220,8 @@ def main():
         parity = check_parity
         if args.scene == "pp":
             from fastap_scenarios.torch_predator_prey import check_parity as parity
+        elif args.scene == "cn":
+            from fastap_scenarios.torch_cooperative_navigation import check_parity as parity
         run_single_team(args, agent, method, "cuda:0", parity, write_json)
         return
     run_course(args, agent, method, "cuda:0")
