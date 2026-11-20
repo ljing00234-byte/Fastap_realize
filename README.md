@@ -1,6 +1,14 @@
 # Fastap_realize
 
-项目复现代码仓库。
+本仓库用于复现论文 *Fast Teammate Adaptation in the Presence of Sudden Policy Change*。
+
+## 游戏场景搭建模块
+
+本模块按论文搭建了协作采食（LBF）、追捕（PP）和协作导航（CN），实现了三个场景的观测、动作和奖励规则。三个游戏共用一套接口，方便后续训练队友和比较算法。
+
+[场景代码](fastap_scenarios/) · [场景配置](configs/scenarios/)
+
+## 项目存储
 
 所有项目文件均存放在 `/mnt/ssd/users/linhui/projects/Fastap_realize/` 下，包括虚拟环境、依赖缓存、模型、数据、临时文件和训练输出。安装、下载和训练前必须显式检查相关写入路径，避免使用 `/home/linhui/` 或系统盘默认缓存目录。
 
