@@ -1,6 +1,7 @@
 """Compose a game, local agent and training method; run them on monitored GPU 2."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -18,6 +19,24 @@ def load_yaml(path):
 
     with path.open(encoding="utf-8") as source:
         return yaml.safe_load(source)
+
+
+def pool_paths(manifest_path, scene):
+    manifest = json.loads(manifest_path.read_text())
+    if (manifest.get("format"), manifest.get("scene"), manifest.get("role")) != (
+            "lbf-teammate-pool-v1", scene, 2):
+        raise ValueError("Incompatible teammate pool for this scene")
+    paths = []
+    for member in manifest["members"]:
+        path = (manifest_path.parent / member["path"]).resolve()
+        if manifest_path.parent not in path.parents or path in paths:
+            raise ValueError("Invalid or duplicate member path")
+        if hashlib.sha256((path / "agent.th").read_bytes()).hexdigest() != member["sha256"]:
+            raise ValueError(f"Frozen actor checksum mismatch for {member['id']}")
+        paths.append(path)
+    if not paths:
+        raise ValueError("The pool does not have a published member yet")
+    return paths
 
 
 def frozen_groups(paths, scene):
@@ -69,9 +88,10 @@ def train(args):
     if args.steps is not None:
         method["t_max"] = args.steps
     trainer = TRAINERS[method["name"]]
-    groups = frozen_groups(args.teammate_checkpoint, scene) if args.teammate_checkpoint else None
+    paths = pool_paths(args.teammate_pool, args.scene) if args.teammate_pool else args.teammate_checkpoint
+    groups = frozen_groups(paths, scene) if paths else None
     config = dict(scene=scene, agent=agent, method=method, seed=args.seed, smoke=args.smoke,
-                  teammate_checkpoints=[str(p.relative_to(ROOT)) for p in args.teammate_checkpoint],
+                  teammate_checkpoints=[str(p.relative_to(ROOT)) for p in paths],
                   gpu_uuid=uuid)
     with (args.run_dir / "config.json").open("x", encoding="utf-8") as out:
         json.dump(config, out, ensure_ascii=False, indent=2)
@@ -89,8 +109,10 @@ def main():
     parser.add_argument("--method-config", type=project_path, default=ROOT / "configs/methods/qmix.yaml")
     parser.add_argument("--control", choices=("team", "ego"), help="which cooperative roles to train")
     parser.add_argument("--teammates", type=int, help="restrict to a supported team size")
-    parser.add_argument("--teammate-checkpoint", action="append", default=[], type=project_path,
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--teammate-checkpoint", action="append", default=[], type=project_path,
                         help="frozen all-team checkpoint directory; repeat to build a pool")
+    source.add_argument("--teammate-pool", type=project_path, help="pool.json with frozen LBF teammate policies")
     parser.add_argument("--switch-interval", type=int, nargs=2, metavar=("MIN", "MAX"),
                         help="enable teammate resampling during ego evaluation")
     parser.add_argument("--seed", type=int, default=7)
@@ -100,7 +122,7 @@ def main():
                         help="reserve expected process GPU memory inside the shared budget")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    if args.control == "team" and (args.teammate_checkpoint or args.switch_interval):
+    if args.control == "team" and (args.teammate_checkpoint or args.teammate_pool or args.switch_interval):
         parser.error("External teammate checkpoints and switching require ego control")
     if args.steps is not None and args.steps < 1:
         parser.error("--steps must be positive")
@@ -108,6 +130,8 @@ def main():
         parser.error("Expected 1 <= MIN <= MAX")
     if any(ROOT not in p.parents for p in args.teammate_checkpoint):
         parser.error("Keep teammate checkpoints inside the project")
+    if args.teammate_pool and ROOT not in args.teammate_pool.parents:
+        parser.error("Keep the pool manifest inside the project")
     if args.worker:
         train(args)
         return
