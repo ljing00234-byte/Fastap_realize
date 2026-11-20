@@ -98,12 +98,13 @@ def pending_allocations(processes):
     reserved = 0
     smoke_script = str(ROOT / "scripts/qmix_lbf_smoke.py").encode()
     baseline_script = str(ROOT / "scripts/run_baseline.py").encode()
+    cooperation_script = str(ROOT / "scripts/train_lbf_cooperation.py").encode()
     for pid, used in processes.items():
         try:
             args = (Path("/proc") / str(pid) / "cmdline").read_bytes().split(b"\0")
         except FileNotFoundError:
             continue
-        if baseline_script in args:
+        if baseline_script in args or cooperation_script in args:
             flag = b"--expected-peak-mib"
             peak = int(args[args.index(flag) + 1]) if flag in args else BASELINE_PEAK
         elif smoke_script in args:
