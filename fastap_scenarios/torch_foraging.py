@@ -12,6 +12,7 @@ class TorchForaging:
     is separate from collection of all foods so the learner can bootstrap correctly.
     """
 
+    scene_key = "lbf"
     n_agents = 3
     n_actions = 6
     obs_shape = 21

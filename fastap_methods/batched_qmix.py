@@ -1,4 +1,4 @@
-"""Device-resident, fixed-horizon QMIX for the single-team LBF experiment."""
+"""Device-resident, fixed-horizon QMIX for batched cooperative games."""
 
 from copy import deepcopy
 from itertools import chain
@@ -12,6 +12,7 @@ from torch.nn import functional as F
 
 from fastap_agents import get_agent_backend
 from fastap_agents.batched import agent_inputs, select_actions, SequenceQ
+from fastap_scenarios.torch_foraging import TorchForaging
 from .qmix import _checkpoint
 
 
@@ -48,7 +49,7 @@ class EpisodeReplay:
 class BatchedQMIX:
     """One shared team policy; train_batch collects and optimizes one batch of games."""
 
-    def __init__(self, agent_config, method_config, *, device, seed):
+    def __init__(self, agent_config, method_config, *, device, seed, world_type=TorchForaging):
         from fastap_agents.local_q import _add_epymarl_src
         _add_epymarl_src()
         from modules.mixers.qmix import QMixer
@@ -59,7 +60,7 @@ class BatchedQMIX:
                 raise ValueError("Use the monitored logical cuda:0 device")
             from scripts.gpu2_monitor import require_monitored_cuda
             require_monitored_cuda()
-        info = dict(n_agents=3, n_actions=6, state_shape=48, obs_shape=21)
+        info = {key: getattr(world_type, key) for key in ("n_agents", "n_actions", "state_shape", "obs_shape")}
         cfg = self.cfg = SimpleNamespace(**method_config)
         if (cfg.name, cfg.learner, cfg.mixer, cfg.action_selector) != (
                 'qmix', 'q_learner', 'qmix', 'epsilon_greedy'):
@@ -70,7 +71,7 @@ class BatchedQMIX:
                 and cfg.epsilon_anneal_time > 0 and 0 <= cfg.epsilon_finish <= cfg.epsilon_start <= 1):
             raise ValueError("Invalid QMIX replay, target or exploration settings")
         backend = get_agent_backend(agent_config['agent'])
-        self.spec = backend.build_spec(info, agent_config, scene_key='lbf', control='team')
+        self.spec = backend.build_spec(info, agent_config, scene_key=world_type.scene_key, control='team')
         cfg.n_agents = self.spec.n_agents
         cfg.state_shape = info['state_shape']
         # Initialize only the CPU RNG, build on CPU, and move the models as a unit.

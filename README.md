@@ -66,6 +66,17 @@ envs/epymarl/bin/python -B scripts/train_lbf_cooperation.py outputs/single_T1 --
 
 输出目录的 `T1/` 含可直接加载的权重，使用 `load_frozen_agent(path).policy_factory(2)` 取得第 3 个角色。选定后在原版 CPU 环境的 1,024 张独立地图上固定两名搭档，对照训练后的 T1、合法随机动作和初始 T1，并记录初始整队的成绩。`protocol.json` 记录事先设定的判据，`heldout.json` 记录逐图回报、至少采到一份和三份全采完的配对比较。
 
+### 生成和检验一名 PP 队友
+
+三个捕食者联合训练，固定逃逸策略控制一只猎物，场上有两个障碍物。每局 25 步，每发生一次捕食者与猎物接触，团队得 10 分，持续接触可重复计分。PP 沿用原始环境奖励。
+
+```bash
+source scripts/epymarl-env.sh
+envs/epymarl/bin/python -B scripts/train_lbf_cooperation.py outputs/pp_single_T1 --scene pp --single-teammate --num-envs 32 --eval-maps 256 --heldout-seed 990000
+```
+
+训练预算为 200 万步。每 5 万步按验证集平均回报选检查点，分数相同时比较至少接触一次的回合比例。选定后从 `T1/` 的权重加载第 3 个捕食者，与固定的两个搭档在原版 CPU 环境上测试 1,024 个独立开局。报告列出随机 T1、初始 T1 和初始整队的同图成绩。训练后的 T1 相对两种替换队友的平均回报差，其配对 bootstrap 95% 区间下界都大于零时，实验判定该队友对团队有正贡献。
+
 ### 生成 LBF 队友集合
 
 默认生成 8 个单队友策略。T1 复用已验证的权重，其余成员使用不同随机种子，各在物理 GPU 2 上训练 200 万步。每张棋盘上有两名搭档和一名队友。模型、环境、奖励和用于选检查点的验证集与 T1 相同。

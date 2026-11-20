@@ -158,6 +158,7 @@ def main():
     import shutil
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
+    parser.add_argument("--scene", choices=("lbf", "pp"), default="lbf")
     parser.add_argument("--num-envs", type=int, default=8)
     parser.add_argument("--stage-steps", type=int, nargs=3, default=(50000, 50000, 100000),
                         metavar=("ADJACENT", "APPROACH", "RANDOM"))
@@ -169,11 +170,13 @@ def main():
     mode.add_argument("--benchmark-only", action="store_true",
                         help="time the same training workload with 1, 8 and 32 parallel boards")
     mode.add_argument("--single-teammate", action="store_true",
-                      help="train one team on standard random LBF for 2M steps and independently test slot 2")
+                      help="train one team for 2M steps on standard random starts and independently test slot 2")
     parser.add_argument("--seed", type=int, default=101)
     parser.add_argument("--expected-peak-mib", type=int, default=BASELINE_PEAK)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.scene != "lbf" and not args.single_teammate:
+        parser.error("PP requires --single-teammate")
     if args.total_steps is None:
         args.total_steps = 2000000 if args.single_teammate else 200000
     args.run_dir = (ROOT / args.run_dir).resolve()
@@ -202,7 +205,7 @@ def main():
     def config(name):
         return yaml.safe_load((ROOT / "configs" / name).read_text())
     agent, method = config("agents/drqn.yaml"), config("methods/qmix.yaml")
-    settings = dict(scene="lbf", gpu_uuid=uuid, device="cuda:0", num_envs=args.num_envs,
+    settings = dict(scene=args.scene, gpu_uuid=uuid, device="cuda:0", num_envs=args.num_envs,
                     seed=args.seed, total_step_budget=args.total_steps, eval_maps=args.eval_maps,
                     heldout_seed=args.heldout_seed, benchmark_only=args.benchmark_only,
                     single_teammate=args.single_teammate, agent=agent, method=method)
@@ -211,7 +214,10 @@ def main():
     write_json(args.run_dir / "config.json", settings)
     if args.single_teammate:
         from fastap_methods.single_teammate import run_single_team
-        run_single_team(args, agent, method, "cuda:0", check_parity, write_json)
+        parity = check_parity
+        if args.scene == "pp":
+            from fastap_scenarios.torch_predator_prey import check_parity as parity
+        run_single_team(args, agent, method, "cuda:0", parity, write_json)
         return
     run_course(args, agent, method, "cuda:0")
 

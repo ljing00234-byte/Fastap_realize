@@ -1,4 +1,4 @@
-"""A single QMIX self-play team, selected on validation and tested on the scalar LBF."""
+"""Train a single QMIX team, select on validation, and test its third role independently."""
 
 import hashlib
 import json
@@ -11,7 +11,9 @@ import numpy as np
 from .cooperation_validation import evaluate_cooperation
 from .response_eval import evaluate_pair
 from .batched_qmix import BatchedQMIX
+from .predator_prey_eval import evaluate_pp_cases, validate_pp
 from fastap_scenarios.torch_foraging import TorchForaging
+from fastap_scenarios.torch_predator_prey import TorchPredatorPrey
 
 
 def compare_outcomes(learned, control):
@@ -32,14 +34,14 @@ def compare_outcomes(learned, control):
     return result
 
 
-def independent_test(directory, selected, seeds):
+def independent_test(directory, selected, seeds, *, scene="lbf"):
     """Load the exported policy through the same public API used by other trainers."""
     initial = directory / "checkpoints" / "0"
     candidate = directory / "T1"
     candidate.mkdir()
     for name in ("agent.json", "agent.th"):
         shutil.copyfile(selected / name, candidate / name)
-    metadata = dict(scene="lbf", slot=2, control="team", source=str(selected.relative_to(directory)),
+    metadata = dict(scene=scene, slot=2, control="team", source=str(selected.relative_to(directory)),
                     sha256=hashlib.sha256((candidate / "agent.th").read_bytes()).hexdigest())
     (candidate / "role.json").write_text(json.dumps(metadata, indent=2) + "\n")
     cases = {
@@ -48,6 +50,9 @@ def independent_test(directory, selected, seeds):
         "initial_T1": (selected, initial, False),
         "initial_team": (initial, initial, False),
     }
+    if scene == "pp":
+        return dict(scene=scene, checkpoint=metadata["source"], role=2, maps=len(seeds),
+                    map_seeds=list(seeds), **evaluate_pp_cases(cases, seeds))
     game_returns = {}
     scores = {}
     for case, (egos, teammate, random) in cases.items():
@@ -72,7 +77,9 @@ def run_single_team(args, agent_cfg, method_cfg, device, parity_check, write_jso
     directory = args.run_dir
     n_validate = args.eval_maps
     test_seeds = range(args.heldout_seed, args.heldout_seed + 1024)
-    protocol = dict(start_distribution="random", fixed_teammate_slot=2, episode_limit=25,
+    scene = getattr(args, "scene", "lbf")
+    world_type = {"lbf": TorchForaging, "pp": TorchPredatorPrey}[scene]
+    protocol = dict(scene=scene, start_distribution="random", fixed_teammate_slot=2, episode_limit=world_type.episode_limit,
                     training_steps=args.total_steps, training_seed=args.seed, num_envs=args.num_envs,
                     validation_seed=650000, validation_maps=n_validate, test_seed_start=test_seeds.start,
                     test_maps=len(test_seeds), validation_interval=50000,
@@ -81,8 +88,15 @@ def run_single_team(args, agent_cfg, method_cfg, device, parity_check, write_jso
                     secondary_endpoint="at least one food collected",
                     controls=["fixed egos + random T1", "fixed egos + initial T1", "initial team"],
                     evidence="positive mean return difference and one-sided paired exact p < .05 against both T1 controls")
+    if scene == "pp":
+        protocol.update(validation_seed=950000, selection=["mean_return", "any_tag_rate"],
+                        prey_policy="evade_predators (fixed)", reward_per_predator_prey_contact=10,
+                        primary_endpoint="mean team return over 25 steps",
+                        secondary_endpoint="fraction of starts with at least one predator-prey contact",
+                        evidence="lower paired 95% bootstrap bound for mean return improvement > 0 against each T1 control",
+                        bootstrap_resamples=10000, bootstrap_seed=49711)
     if set(test_seeds).intersection([args.seed, args.seed+1, args.seed+2, args.seed+10,
-                                    protocol["validation_seed"]+4, protocol["validation_seed"]+5]):
+                                    protocol["validation_seed"], protocol["validation_seed"]+4, protocol["validation_seed"]+5]):
         raise ValueError("Select independent held-out seeds")
     write_json(directory / "protocol.json", protocol)
     state = dict(phase="checking_environment", training_steps=0, selected_checkpoint=None)
@@ -93,8 +107,8 @@ def run_single_team(args, agent_cfg, method_cfg, device, parity_check, write_jso
     update()
     try:
         parity = parity_check(device)
-        learner = BatchedQMIX(agent_cfg, method_cfg, device=device, seed=args.seed)
-        world = TorchForaging(args.num_envs, device=device, seed=args.seed+10)
+        learner = BatchedQMIX(agent_cfg, method_cfg, device=device, seed=args.seed, world_type=world_type)
+        world = world_type(args.num_envs, device=device, seed=args.seed+10)
         checkpoints = directory / "checkpoints"
         learner.save_checkpoint(checkpoints / "0")
         update(phase="training", parity=parity)
@@ -107,8 +121,12 @@ def run_single_team(args, agent_cfg, method_cfg, device, parity_check, write_jso
                 log.write(json.dumps(dict(kind="train", **batch), allow_nan=False) + "\n")
                 if learner.steps < next_eval and learner.steps < args.total_steps:
                     continue
-                result = evaluate_cooperation(learner.actor, learner.spec, "random", split="validation",
-                                              split_seed=protocol["validation_seed"], device=device, n_maps=n_validate)
+                if scene == "pp":
+                    result = validate_pp(learner.actor, learner.spec, seed=protocol["validation_seed"],
+                                         device=device, n_maps=n_validate)
+                else:
+                    result = evaluate_cooperation(learner.actor, learner.spec, "random", split="validation",
+                                                  split_seed=protocol["validation_seed"], device=device, n_maps=n_validate)
                 log.write(json.dumps(dict(kind="validation", training_steps=learner.steps, **result)) + "\n")
                 score = tuple(result["trained"][key] for key in protocol["selection"])
                 if best is None or score > best:
@@ -123,10 +141,9 @@ def run_single_team(args, agent_cfg, method_cfg, device, parity_check, write_jso
                        elapsed_training_seconds=monotonic()-started)
                 next_eval += protocol["validation_interval"]
         update(phase="independent_test")
-        results = independent_test(directory, selected, test_seeds)
+        results = independent_test(directory, selected, test_seeds, scene=scene)
         write_json(directory / "heldout.json", results)
-        update(phase="complete", evidence_for_full_completion=results["evidence_for_full_completion"],
-               evidence_for_any_food=results["evidence_for_any_food"])
+        update(phase="complete", **{k: v for k, v in results.items() if k.startswith("evidence_for_")})
     except BaseException as error:
         update(phase="interrupted" if isinstance(error, KeyboardInterrupt) else "failed", error=repr(error))
         raise
