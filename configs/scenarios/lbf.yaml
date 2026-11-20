@@ -1,0 +1,5 @@
+env: fastap_scenario
+runner: fastap_episode
+env_args:
+  key: lbf
+  control: ego
