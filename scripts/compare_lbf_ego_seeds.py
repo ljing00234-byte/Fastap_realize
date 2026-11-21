@@ -13,12 +13,7 @@ import json
 from pathlib import Path
 from statistics import mean, stdev
 
-import matplotlib
 import numpy as np
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib import font_manager
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -122,6 +117,11 @@ def summarize(directories, paper_path):
 
 
 def draw(report, path):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+
     cjk_fonts = ["Noto Sans CJK SC", "Noto Sans CJK JP", "Microsoft YaHei", "PingFang SC",
                  "WenQuanYi Zen Hei", "Droid Sans Fallback"]
     installed_fonts = set(font_manager.get_font_names())

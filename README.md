@@ -128,6 +128,16 @@ envs/lbf-plot/bin/python -B scripts/compare_lbf_ego_seeds.py outputs/lbf_pool_eg
 
 图和统计表写入 `outputs/lbf_pool_ego_qmix_five_seeds/`。验证曲线与原论文图 3(a) 对照，期末独立测试与表 1 的静态队友行对照。
 
+对照第 25 步超时处理时，使用相同的训练种子和队友池。默认做法在超时时保留下一状态的估计价值，加上 `--no-bootstrap-at-time-limit` 后，超时那一步只用当步的标准化奖励作为训练目标。两种策略按同一规则累计前 25 步的原始团队回报。
+
+```bash
+source scripts/epymarl-env.sh
+timeout_run=outputs/lbf_pool_ego_qmix_timeout_terminal_1107
+envs/epymarl/bin/python -B scripts/train_lbf_pool_ego.py "$timeout_run" --seed 1107 --no-bootstrap-at-time-limit
+envs/epymarl/bin/python -B scripts/compare_lbf_time_limit.py compare outputs/lbf_pool_ego_qmix_01 "$timeout_run" "$timeout_run/comparison.json"
+envs/lbf-plot/bin/python -B scripts/compare_lbf_time_limit.py plot "$timeout_run/comparison.json" "$timeout_run/learning-curves.png"
+```
+
 如果训练已经跑满、最终检查点已保存，但独立测试中断，可向同一个训练入口传入原运行目录和 `--finish-heldout`。它会读取该次实验记录的队友、检查点和测试地图，在 CPU 上补完评估。
 
 ### 生成 PP 队友集合

@@ -133,7 +133,7 @@ def train(args, *, device, gpu_uuid):
     agent = load_yaml(ROOT / "configs/agents/drqn.yaml")
     method = load_yaml(ROOT / "configs/methods/qmix.yaml")
     validation_interval = method["save_model_interval"]
-    method.update(t_max=args.total_steps, bootstrap_at_time_limit=True, standardise_rewards=True,
+    method.update(t_max=args.total_steps, bootstrap_at_time_limit=args.bootstrap_at_time_limit, standardise_rewards=True,
                   test_interval=validation_interval, test_nepisode=2 * len(names) * args.validation_maps)
     write_json(directory / "config.json", dict(scene="lbf", control="ego", device=device,
                gpu_uuid=gpu_uuid, num_envs=args.num_envs, seed=args.seed, agent=agent, method=method,
@@ -224,6 +224,8 @@ def main():
     parser.add_argument("--seed", type=int, default=1107)
     parser.add_argument("--num-envs", type=int, default=32)
     parser.add_argument("--total-steps", type=int, default=2_000_000)
+    parser.add_argument("--no-bootstrap-at-time-limit", action="store_false", dest="bootstrap_at_time_limit",
+                        help="Treat the 25-step timeout as terminal in the QMIX training target")
     parser.add_argument("--validation-seed", type=int, default=2_100_000)
     parser.add_argument("--validation-maps", type=int, default=64)
     parser.add_argument("--heldout-seed", type=int, default=2_200_000)
