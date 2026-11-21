@@ -14,12 +14,12 @@ from fastap_scenarios.torch_foraging import TorchForaging
 from fastap_scenarios.torch_predator_prey import TorchPredatorPrey
 
 
-def _initial_boards(first_seed, count):
+def _initial_boards(first_seed, count, n_teammates=1):
     fields, positions, levels = [], [], []
     for seed in range(first_seed, first_seed + count):
         board = ForagingWorld(seed=seed)
         try:
-            board.reset(1)
+            board.reset(n_teammates)
             fields.append(board.field.copy())
             positions.append([p.position for p in board.players])
             levels.append([p.level for p in board.players])

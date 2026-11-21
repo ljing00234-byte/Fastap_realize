@@ -52,6 +52,7 @@ class BatchedQMIX:
     def __init__(self, agent_config, method_config, *, device, seed, world_type=TorchForaging):
         from fastap_agents.local_q import _add_epymarl_src
         _add_epymarl_src()
+        from components.standarize_stream import RunningMeanStd
         from modules.mixers.qmix import QMixer
 
         self.device = torch.device(device)
@@ -66,13 +67,15 @@ class BatchedQMIX:
         if (cfg.name, cfg.learner, cfg.mixer, cfg.action_selector) != (
                 'qmix', 'q_learner', 'qmix', 'epsilon_greedy'):
             raise ValueError("This trainer requires the epsilon-greedy QMIX learner")
-        if cfg.standardise_rewards or cfg.standardise_returns or not cfg.double_q:
-            raise ValueError("Batched QMIX uses raw game rewards and Double Q targets")
+        if cfg.standardise_returns or not cfg.double_q:
+            raise ValueError("Batched QMIX requires Double Q and unstandardised returns")
+        self.reward_stats = RunningMeanStd(shape=(1,), device=self.device) if cfg.standardise_rewards else None
         if not (1 <= cfg.batch_size <= cfg.buffer_size and cfg.target_update_interval_or_tau >= 1
                 and cfg.epsilon_anneal_time > 0 and 0 <= cfg.epsilon_finish <= cfg.epsilon_start <= 1):
             raise ValueError("Invalid QMIX replay, target or exploration settings")
         backend = get_agent_backend(agent_config['agent'])
-        self.spec = backend.build_spec(info, agent_config, scene_key=world_type.scene_key, control='team')
+        self.spec = backend.build_spec(info, agent_config, scene_key=world_type.scene_key,
+                                       control=getattr(world_type, 'control', 'team'))
         cfg.n_agents = self.spec.n_agents
         cfg.state_shape = info['state_shape']
         # Initialize only the CPU RNG, build on CPU, and move the models as a unit.
@@ -103,6 +106,9 @@ class BatchedQMIX:
         torch.save(self.actor.state_dict(), directory / 'agent.th')
         torch.save(self.mixer.state_dict(), directory / 'mixer.th')
         torch.save(self.optimizer.state_dict(), directory / 'opt.th')
+        if self.reward_stats is not None:
+            torch.save(dict(mean=self.reward_stats.mean, var=self.reward_stats.var, count=self.reward_stats.count),
+                       directory / 'reward_stats.th')
 
     def save_checkpoint(self, directory):
         directory = Path(directory)
@@ -138,6 +144,20 @@ class BatchedQMIX:
         trajectory['available'].append(available)
         return {name: torch.stack(values, dim=1) for name, values in trajectory.items()}
 
+    def _td_rewards(self, sample):
+        rewards = sample['reward']
+        if self.reward_stats is None:
+            return rewards
+        # EPyMARL trims the sampled batch to its longest episode, then updates
+        # moments over *all* entries in that rectangle, including shorter games' zero padding.
+        # Compute the same moments with a device mask to avoid a host read of the length.
+        columns = sample['filled'].any(dim=0)
+        count = (columns.sum() * rewards.size(0)).to(torch.float64)
+        mean = ((rewards * columns).sum().reshape(1) / count).to(rewards.dtype)
+        variance = (((rewards - mean).square() * columns).sum().reshape(1) / (count - 1)).to(rewards.dtype)
+        self.reward_stats.update_from_moments(mean, variance, count)
+        return (rewards - self.reward_stats.mean) / self.reward_stats.var.sqrt()
+
     def _update(self, sample):
         actions = sample['actions']
         previous = F.pad(F.one_hot(actions, self.spec.n_actions).float(), (0, 0, 0, 0, 1, 0))
@@ -152,7 +172,7 @@ class BatchedQMIX:
             end = sample['terminated']
             if not self.cfg.bootstrap_at_time_limit:
                 end = end | sample['truncated']
-            targets = sample['reward'] + self.cfg.gamma * (~end) * next_values
+            targets = self._td_rewards(sample) + self.cfg.gamma * (~end) * next_values
         valid = sample['filled']
         loss = ((values - targets).square() * valid).sum() / valid.sum()
         self.optimizer.zero_grad(set_to_none=True)

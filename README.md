@@ -10,7 +10,7 @@
 
 ## 智能体与训练方法
 
-**第一条基线是 vanilla QMIX。** 训练时，QMIX 使用全局状态将各角色的动作价值组合为团队价值；执行时，每个角色只根据自己的局部历史选择合法动作。LBF、PP 和 CN 的奖励直接来自游戏，进入回放、TD 更新和评估的都是原始团队奖励。[Fastap 论文](https://proceedings.mlr.press/v216/zhang23a.html) · [QMIX 原文](https://proceedings.mlr.press/v80/rashid18a.html)
+**第一条基线是 vanilla QMIX。** 训练时，QMIX 使用全局状态将各角色的动作价值组合为团队价值；执行时，每个角色只根据自己的局部历史选择合法动作。LBF、PP 和 CN 的回放和评估记录原始团队奖励。生成冻结队友时，TD 更新也使用原始奖励；下述 LBF ego 实验按所用 EPyMARL 版本的默认设置，在计算 TD 目标前标准化奖励。[Fastap 论文](https://proceedings.mlr.press/v216/zhang23a.html) · [QMIX 原文](https://proceedings.mlr.press/v80/rashid18a.html)
 
 | 模块 | 输入与职责 | 扩展入口 |
 | --- | --- | --- |
@@ -104,6 +104,17 @@ envs/epymarl/bin/python -B scripts/generate_lbf_pool.py outputs/lbf_teammate_poo
 每完成一名成员的 1,024 图独立测试，`pool.json` 就会增加一条记录，分别标明能否证实采到食物和采完全图的贡献。实验保留预定种子的全部结果。后续 ego 训练可用 `--teammate-pool outputs/lbf_teammate_pool_01/pool.json` 读取启动时已发布的成员，也可用 `--teammate-checkpoint` 指定个别成员。
 
 全体完成后，`crossplay.json` 记录在另外 256 张相同地图上互换队友的成绩，每行固定一对原搭档，每列更换第 3 个角色。文件也记录了各个队友在 T1 原团队同一批观测及动作历史上选择不同动作的比例。
+
+### 训练 LBF 的 QMIX ego
+
+```bash
+source scripts/epymarl-env.sh
+envs/epymarl/bin/python -B scripts/train_lbf_pool_ego.py outputs/lbf_pool_ego_qmix_01
+```
+
+两个 ego 从零训练并共享 GRU 权重。棋盘为 6×6，有三份食物、3×3 局部视野和 25 步时限。每局抽取一名或两名冻结队友，局内固定。训练预算为 200 万个有效环境步，主要结果使用期末检查点的原始团队回报。[LBF 场景及 QMIX 网络](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=3) · [原论文图 3](https://proceedings.mlr.press/v216/zhang23a/zhang23a.pdf#page=7)
+
+作者未公布两种阵容的比例和队友权重。本实验每批 32 局两种人数各半，从 T1–T8 等概率抽取队友。双队友从池中不放回抽取，两个角色各用自己的观测和记忆。两种阵容分别报告回报，并以等权均值汇总。每约 5 万步验证一次，期末使用另外 1,024 个地图种子评估，同时保留初始权重及验证集表现最好的检查点供对照。
 
 ### 生成 PP 队友集合
 

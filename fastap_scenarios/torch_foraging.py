@@ -1,4 +1,4 @@
-"""Device-resident, batched three-player LBF, using the scalar LBF game as reference."""
+"""Device-resident, batched LBF, using the scalar LBF game as reference."""
 
 import torch
 
@@ -6,7 +6,7 @@ from .foraging import _DELTAS, _FOOD_LAYOUTS
 
 
 class TorchForaging:
-    """One independent three-player game per row; done rows stay frozen until reset.
+    """One three- or four-player game per row; done rows stay frozen until reset.
 
     All actions and outputs are tensors on the configured device. Time-limit truncation
     is separate from collection of all foods so the learner can bootstrap correctly.
@@ -19,9 +19,12 @@ class TorchForaging:
     state_shape = 48
     episode_limit = 25
 
-    def __init__(self, batch_size, device, seed=0):
+    def __init__(self, batch_size, device, seed=0, *, n_agents=3):
         if batch_size < 1:
             raise ValueError("batch_size must be positive")
+        if n_agents not in (3, 4):
+            raise ValueError("LBF requires two ego agents and one or two teammates")
+        self.n_agents = n_agents
         self.batch_size = batch_size
         self.device = torch.device(device)
         self.generator = torch.Generator(device=self.device).manual_seed(seed)
@@ -43,22 +46,23 @@ class TorchForaging:
                                       for layout in _FOOD_LAYOUTS], device=device)
         self._food_order = self._visibility_order((0, 1, 2)).to(device)
         self._player_order = torch.stack([
-            self._visibility_order((slot,) + tuple(i for i in range(3) if i != slot))
-            for slot in range(3)
+            self._visibility_order((slot,) + tuple(i for i in range(n_agents) if i != slot))
+            for slot in range(n_agents)
         ]).to(device)
-        self._slots = torch.arange(3, device=device)
-        self._bits = torch.tensor([1, 2, 4], device=device)
+        self._slots = torch.arange(n_agents, device=device)
+        self._bits = 1 << self._slots
         self._padding = torch.tensor([-1, -1, 0], device=device)
         self._batch = torch.arange(batch_size, device=device)
-        self._other = (~torch.eye(3, dtype=torch.bool)).to(device)
+        self._other = (~torch.eye(n_agents, dtype=torch.bool)).to(device)
 
     @staticmethod
     def _visibility_order(priority):
-        # The value 3 denotes the missing (-1, -1, 0) entity.
+        # The last index addresses the padding triple (-1, -1, 0).
+        count = len(priority)
         orders = []
-        for mask in range(8):
+        for mask in range(1 << count):
             visible = [slot for slot in priority if mask & (1 << slot)]
-            orders.append(visible + [3] * (3 - len(visible)))
+            orders.append(visible + [count] * (count - len(visible)))
         return torch.tensor(orders)
 
     def _random(self, *shape):
@@ -66,21 +70,21 @@ class TorchForaging:
 
     def _approach(self, food, adjacent):
         # Move one player one or two legal moves away from its own loading square.
-        # Keeping both other players stationary always leaves a route back.
-        origin = adjacent[:, 2]
+        # Keeping the other players stationary always leaves a route back.
+        origin = adjacent[:, -1]
         cell = origin
         for distance in (2, 3):
             candidates = self._neighbors[cell]
             valid = self._valid_move[cell] & (self._distance[food[:, None], candidates] == distance)
             valid &= (self._field.gather(1, candidates) == 0)
-            valid &= (candidates[:, :, None] != adjacent[:, None, :2]).all(-1)
+            valid &= (candidates[:, :, None] != adjacent[:, None, :-1]).all(-1)
             choice = self._random(self.batch_size, 4).masked_fill(~valid, -1).argmax(1)
             chosen = candidates[self._batch, choice]
             accept = valid.any(1)
             if distance == 3:
                 accept &= self._random(self.batch_size) < 0.5
             cell = torch.where(accept, chosen, cell)
-        return torch.cat((adjacent[:, :2], cell[:, None]), dim=1)
+        return torch.cat((adjacent[:, :-1], cell[:, None]), dim=1)
 
     def reset(self, layout="random"):
         if layout not in ("adjacent", "approach", "random"):
@@ -88,22 +92,23 @@ class TorchForaging:
         size = self.batch_size
         idx = torch.randint(len(self._layouts), (size,), generator=self.generator, device=self.device)
         self._food_cells = self._layouts[idx]
-        self.levels = torch.randint(1, 4, (size, 3), generator=self.generator, device=self.device)
-        self._food_levels = self.levels.sum(1, keepdim=True).expand(-1, 3)
+        self.levels = torch.randint(1, 4, (size, self.n_agents), generator=self.generator, device=self.device)
+        food_level = self.levels.sort(1).values[:, :3].sum(1, keepdim=True)
+        self._food_levels = food_level.expand(-1, 3)
         self._field = torch.zeros(size, 36, device=self.device, dtype=torch.long)
         self._field.scatter_(1, self._food_cells, self._food_levels)
         if layout == "random":
-            # Exchangeable random ranks sample three distinct unoccupied squares in slot order.
+            # Exchangeable random ranks sample distinct unoccupied squares in slot order.
             ranks = self._random(size, 36).masked_fill(self._field != 0, 2)
-            self._cells = ranks.topk(3, largest=False).indices
+            self._cells = ranks.topk(self.n_agents, largest=False).indices
         else:
             food_index = torch.randint(3, (size,), generator=self.generator, device=self.device)
             target = self._food_cells[self._batch, food_index]
-            slots = self._random(size, 4).argsort(1)[:, :3]
+            slots = self._random(size, 4).argsort(1)[:, :self.n_agents]
             cells = self._neighbors[target].gather(1, slots)
             if layout == "approach":
                 cells = self._approach(target, cells)
-                cells = cells.gather(1, self._random(size, 3).argsort(1))
+                cells = cells.gather(1, self._random(size, self.n_agents).argsort(1))
             self._cells = cells
         self.initial_food_total = self._food_levels.sum(1)
         self.steps = torch.zeros(size, device=self.device, dtype=torch.long)
@@ -131,9 +136,9 @@ class TorchForaging:
             return tensor.clone()
 
         self._field = data(field, (size, 6, 6)).reshape(size, 36)
-        positions = data(positions, (size, 3, 2))
+        positions = data(positions, (size, self.n_agents, 2))
         self._cells = 6 * positions[..., 0] + positions[..., 1]
-        self.levels = data(levels, (size, 3))
+        self.levels = data(levels, (size, self.n_agents))
         # Row-major ordering is observable. Pad absent foods with zero-level entries.
         ids = torch.arange(36, device=self.device).expand(size, -1)
         sorted_ids = ids.masked_fill(self._field == 0, 36).sort(1).values[:, :3]
@@ -161,33 +166,34 @@ class TorchForaging:
     def _visible_entities(self, cells, levels, players):
         local = self._local[self._cells[:, :, None], cells[:, None, :]]
         visible = (local[..., 0] >= 0) & (levels[:, None, :] > 0)
-        mask = (visible.long() * self._bits).sum(-1)
+        mask = (visible.long() * self._bits[:cells.shape[1]]).sum(-1)
         order = self._player_order[self._slots, mask] if players else self._food_order[mask]
-        triples = torch.cat((local, levels[:, None, :, None].expand(-1, 3, -1, -1)), dim=-1)
-        triples = torch.cat((triples, self._padding.expand(self.batch_size, 3, 1, 3)), dim=2)
+        triples = torch.cat((local, levels[:, None, :, None].expand(-1, self.n_agents, -1, -1)), dim=-1)
+        triples = torch.cat((triples, self._padding.expand(self.batch_size, self.n_agents, 1, 3)), dim=2)
         return triples.gather(2, order.unsqueeze(-1).expand(-1, -1, -1, 3)).flatten(2)
 
     def observations(self):
         food = self._visible_entities(self._food_cells, self._food_levels, False)
         agents = self._visible_entities(self._cells, self.levels, True)
-        return torch.cat((food, agents, self._padding.expand(self.batch_size, 3, 3)), dim=-1).float()
+        padding = self._padding.expand(self.batch_size, self.n_agents, 4 - self.n_agents, 3).flatten(2)
+        return torch.cat((food, agents, padding), dim=-1).float()
 
     def state(self):
         triples = torch.cat((self.positions, self.levels.unsqueeze(-1)), dim=-1)
-        return torch.cat((self._field, triples.flatten(1), self._padding.expand(self.batch_size, 3)),
-                         dim=-1).float()
+        padding = self._padding.expand(self.batch_size, 4 - self.n_agents, 3).flatten(1)
+        return torch.cat((self._field, triples.flatten(1), padding), dim=-1).float()
 
     def step(self, actions):
         """Advance all active games, returning reward, genuine termination and timeout."""
-        if actions.shape != (self.batch_size, 3):
-            raise ValueError(f"Expected actions shaped ({self.batch_size}, 3)")
+        if actions.shape != (self.batch_size, self.n_agents):
+            raise ValueError(f"Expected actions shaped ({self.batch_size}, {self.n_agents})")
         active = ~(self.terminated | self.truncated)
         valid = self._available.gather(2, actions.unsqueeze(-1)).squeeze(-1)
         actions = torch.where(active[:, None] & valid, actions, 0)
         moving = (actions >= 1) & (actions <= 4)
         destination = self._moves.gather(2, (actions - 1).clamp(0, 3).unsqueeze(-1)).squeeze(-1)
         destination = torch.where(moving, destination, self._cells)
-        # A rejected move blocks its old square. At most three passes resolve the chain.
+        # A rejected move blocks its old square. Propagate blocks along the full chain.
         for _ in range(self.n_agents):
             conflicts = ((destination[:, :, None] == destination[:, None, :]) & self._other).any(-1)
             destination = torch.where(conflicts, self._cells, destination)

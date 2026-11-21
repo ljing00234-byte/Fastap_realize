@@ -15,11 +15,40 @@ from fastap_scenarios.torch_foraging import TorchForaging
 
 
 class BatchedQMIXTests(unittest.TestCase):
-    def make_learner(self):
+    def make_learner(self, **overrides):
         agent = yaml.safe_load((PROJECT / 'configs/agents/drqn.yaml').read_text())
         method = yaml.safe_load((PROJECT / 'configs/methods/qmix.yaml').read_text())
         method.update(batch_size=3, buffer_size=7, target_update_interval_or_tau=2)
+        method.update(overrides)
         return BatchedQMIX(agent, method, device='cpu', seed=29)
+
+    def test_reward_standardisation_matches_epymarl_without_changing_replay(self):
+        learner = self.make_learner(standardise_rewards=True)
+        raw_learner = self.make_learner()
+        from components.standarize_stream import RunningMeanStd
+        reference = RunningMeanStd(shape=(1,), device='cpu')
+        episodes = learner._collect(TorchForaging(3, 'cpu', seed=81), 'random', 0)
+        # The sampled EPyMARL batch retains shorter episodes' padding up to the longest.
+        episodes['filled'][:] = False
+        episodes['filled'][0, :3] = True
+        episodes['filled'][1, :7] = True
+        episodes['filled'][2, :2] = True
+        episodes['reward'].zero_()
+        episodes['reward'][0, 1] = 1/3
+        episodes['reward'][1, 5] = 2/3
+        episodes['reward'][2, 0] = 1
+        learner.replay.insert(episodes)
+        sample = learner.replay.sample(3, learner.replay_rng)
+        raw = sample['reward'].clone()
+        reference.update(raw[:, :7].unsqueeze(-1))
+        expected = (raw - reference.mean) / reference.var.sqrt()
+        expected_loss = raw_learner._update({**sample, 'reward': expected})
+        actual_loss = learner._update(sample)
+        torch.testing.assert_close(actual_loss, expected_loss)
+        torch.testing.assert_close(learner.reward_stats.mean, reference.mean)
+        torch.testing.assert_close(learner.reward_stats.var, reference.var)
+        torch.testing.assert_close(sample['reward'], raw)
+        torch.testing.assert_close(learner.replay.data['reward'][:3], episodes['reward'])
 
     def test_sequence_matches_independent_rollout_and_shares_gradients(self):
         learner = self.make_learner()
