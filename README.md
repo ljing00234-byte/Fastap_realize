@@ -128,6 +128,8 @@ envs/lbf-plot/bin/python -B scripts/compare_lbf_ego_seeds.py outputs/lbf_pool_eg
 
 图和统计表写入 `outputs/lbf_pool_ego_qmix_five_seeds/`。验证曲线与原论文图 3(a) 对照，期末独立测试与表 1 的静态队友行对照。
 
+如果训练已经跑满、最终检查点已保存，但独立测试中断，可向同一个训练入口传入原运行目录和 `--finish-heldout`。它会读取该次实验记录的队友、检查点和测试地图，在 CPU 上补完评估。
+
 ### 生成 PP 队友集合
 
 ```bash

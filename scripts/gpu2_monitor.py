@@ -22,10 +22,10 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def query(kind, fields):
+def query(kind, fields, *, timeout=8):
     output = subprocess.check_output(
         ["nvidia-smi", "-i", "2", f"--query-{kind}={fields}", "--format=csv,noheader,nounits"],
-        text=True, timeout=8,
+        text=True, timeout=timeout,
     )
     return list(csv.reader(output.splitlines(), skipinitialspace=True))
 
@@ -68,12 +68,16 @@ def belongs_to_project(pid, executable):
         if cwd == ROOT or ROOT in cwd.parents:
             return True
         return (str(ROOT) + "/").encode() in (proc / "cmdline").read_bytes()
-    except FileNotFoundError:
-        # Distinguish an exited process from one hidden by /proc permissions.
-        visible_pids = {int(pid_text) for (pid_text,) in query("compute-apps", "pid")}
-        if pid in visible_pids:
-            raise RuntimeError(f"Cannot establish ownership of GPU process {pid}")
-        return False
+    except FileNotFoundError as exc:
+        # NVML may briefly list an exited process after its /proc entry is gone.
+        # Accept its disappearance only when the device itself confirms it.
+        deadline = time.monotonic() + 2.0
+        while (remaining := deadline - time.monotonic()) > 0:
+            rows = query("compute-apps", "pid", timeout=remaining)
+            if all(int(pid_text) != pid for (pid_text,) in rows):
+                return False
+            time.sleep(min(0.2, remaining))
+        raise RuntimeError(f"Cannot establish ownership of GPU process {pid}") from exc
     except PermissionError as exc:
         raise RuntimeError(f"Cannot establish ownership of GPU process {pid}") from exc
 
