@@ -116,6 +116,18 @@ envs/epymarl/bin/python -B scripts/train_lbf_pool_ego.py outputs/lbf_pool_ego_qm
 
 作者未公布两种阵容的比例和队友权重。本实验每批 32 局两种人数各半，从 T1–T8 等概率抽取队友。双队友从池中不放回抽取，两个角色各用自己的观测和记忆。两种阵容分别报告回报，并以等权均值汇总。每约 5 万步验证一次，期末使用另外 1,024 个地图种子评估，同时保留初始权重及验证集表现最好的检查点供对照。
 
+五种子实验使用 `1107、2207、3307、4407、5507`，各自从零训练 200 万步，依次对应 `outputs/lbf_pool_ego_qmix_01` 至 `_05`。对齐每 5 万步的验证记录后，绘制五条曲线、等权均值和跨种子样本标准差。期末独立测试使用各自的最终检查点。
+
+```bash
+source scripts/epymarl-env.sh
+# 将论文正式版 PDF 的本地路径替换为实际路径。提取曲线需要 Poppler。
+python3 scripts/extract_lbf_qmix_curve.py path/to/fastap.pdf .tmp/epymarl/lbf_fig3a_qmix_digitized.json
+# 使用装有 matplotlib 3.9.4 和 NumPy 的绘图环境。
+envs/lbf-plot/bin/python -B scripts/compare_lbf_ego_seeds.py outputs/lbf_pool_ego_qmix_{01,02,03,04,05}
+```
+
+图和统计表写入 `outputs/lbf_pool_ego_qmix_five_seeds/`。验证曲线与原论文图 3(a) 对照，期末独立测试与表 1 的静态队友行对照。
+
 ### 生成 PP 队友集合
 
 ```bash
