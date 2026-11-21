@@ -10,7 +10,7 @@
 
 ## 智能体与训练方法
 
-**第一条基线是 vanilla QMIX。** 训练时，QMIX 使用全局状态将各角色的动作价值组合为团队价值；执行时，每个角色只根据自己的局部历史选择合法动作。LBF、PP 和 CN 的回放和评估记录原始团队奖励。生成冻结队友时，TD 更新也使用原始奖励；下述 LBF ego 实验按所用 EPyMARL 版本的默认设置，在计算 TD 目标前标准化奖励。[Fastap 论文](https://proceedings.mlr.press/v216/zhang23a.html) · [QMIX 原文](https://proceedings.mlr.press/v80/rashid18a.html)
+**第一条基线是 vanilla QMIX。** 训练时，QMIX 使用全局状态将各角色的动作价值组合为团队价值。执行时，每个角色根据自己的局部历史选择合法动作。LBF、PP 和 CN 的回放和评估记录原始团队奖励。生成冻结队友时，TD 更新也使用原始奖励。下述 LBF 和 PP 的 ego 实验在计算 TD 目标前标准化奖励。[Fastap 论文](https://proceedings.mlr.press/v216/zhang23a.html) · [QMIX 原文](https://proceedings.mlr.press/v80/rashid18a.html)
 
 | 模块 | 输入与职责 | 扩展入口 |
 | --- | --- | --- |
@@ -148,6 +148,17 @@ envs/epymarl/bin/python -B scripts/generate_teammate_pool.py outputs/pp_teammate
 ```
 
 T1 复用通过检验的 25 步终止模型。T2–T8 使用不同种子，各训练 200 万步，第 25 步的目标等于当步奖励。每名成员在相同的 1,024 个开局上与随机队友、未训练队友对照。`pool.json` 保留所有预定种子的权重路径、测试得分和检验结论，供 `--scene pp --teammate-pool` 加载。全部完成后，在另外 256 个开局上评估每对搭档与每名队友的组合，接触局数、平均团队回报和动作差异写入 `crossplay.json`。
+
+### 训练 PP 的 QMIX ego
+
+两个 ego 捕食者从零开始训练，每局从冻结的 T1–T8 中等概率抽取第三名捕食者，固定配合 25 步。团队回报按所有捕食者与猎物的接触次数累计，每次得 10 分。ego 沿用 LBF 正式基线的训练目标，在第 25 步超时时保留下一状态的估值。
+
+```bash
+source scripts/epymarl-env.sh
+envs/epymarl/bin/python -B scripts/train_pool_ego.py outputs/pp_pool_ego_qmix_gpu_01 --scene pp --seed 1107 --validation-seed 3100000 --heldout-seed 3200000
+```
+
+模型初始化、开局生成、环境推进、队友推理、经验回放和 QMIX 更新都在物理 GPU 2 上执行。训练 200 万个有效环境步，每 5 万步在同一卡上验证一次。期末让训练好的 ego 和同一次训练的初始 ego 各自与八名队友搭档，在相同的 1,024 个独立开局上测试，每个模型共 8,192 局。GPU 按开局计算配对回报差及其 95% 区间，随后将成绩写入 `heldout.json`。
 
 ### 生成 CN 队友集合
 

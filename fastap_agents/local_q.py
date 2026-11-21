@@ -91,12 +91,14 @@ class FrozenAgent:
         """Older agent.th files can be loaded with their original explicit spec."""
         if spec is None:
             spec = AgentSpec.load(checkpoint_dir)
-        weights = torch.load(Path(checkpoint_dir) / "agent.th", map_location="cpu", weights_only=True)
-        # Constructing a temporary network must not change the training RNG.
-        with torch.random.fork_rng(devices=[]):
+        weights = torch.load(Path(checkpoint_dir) / "agent.th", map_location=device, weights_only=True)
+        # The checkpoint supplies every weight. Allocate on the requested device
+        # without drawing random parameters that would immediately be overwritten.
+        with torch.device("meta"):
             model = spec.build_network()
+        model.to_empty(device=device)
         model.load_state_dict(weights, strict=True)
-        return cls(spec, model.to(device))
+        return cls(spec, model)
 
     def policy_factory(self, slot):
         """Create a fresh local policy for this zero-based slot of the training roster."""

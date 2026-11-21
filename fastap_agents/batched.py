@@ -25,7 +25,8 @@ def select_actions(actor, spec, obs, available, hidden, last_actions, *, epsilon
         hidden = actor.init_hidden().expand(batch_size * spec.n_agents, -1)
     q_values, hidden = actor(inputs, hidden)
     greedy = q_values.view_as(available).masked_fill(~available.bool(), -torch.inf).argmax(-1)
-    if epsilon:
+    # A device-side training schedule must not synchronize the host in each step.
+    if isinstance(epsilon, torch.Tensor) or epsilon:
         # I.i.d. continuous scores give a uniform draw over legal actions.
         scores = torch.rand(available.shape, device=obs.device, generator=generator)
         random_actions = scores.masked_fill(~available.bool(), -1).argmax(-1)

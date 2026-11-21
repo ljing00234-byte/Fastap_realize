@@ -22,6 +22,21 @@ class BatchedQMIXTests(unittest.TestCase):
         method.update(overrides)
         return BatchedQMIX(agent, method, device='cpu', seed=29)
 
+    def test_device_native_initialization_and_epsilon_schedule(self):
+        before = torch.get_rng_state()
+        original = self.make_learner()
+        native = self.make_learner(initialize_on_device=True)
+        self.assertTrue(torch.equal(torch.get_rng_state(), before))
+        for first, second in zip(original.params, native.params):
+            torch.testing.assert_close(first, second)
+        worlds = [TorchForaging(3, 'cpu', seed=4) for _ in range(2)]
+        for _ in range(2):
+            result = [learner.train_batch(world, 'random') for learner, world in zip((original, native), worlds)]
+            self.assertEqual(result[0]['epsilon'], result[1]['epsilon'])
+            self.assertEqual(result[0]['loss'], result[1]['loss'])
+        for field in original.replay.data:
+            torch.testing.assert_close(original.replay.data[field][:6], native.replay.data[field][:6])
+
     def test_reward_standardisation_matches_epymarl_without_changing_replay(self):
         learner = self.make_learner(standardise_rewards=True)
         raw_learner = self.make_learner()

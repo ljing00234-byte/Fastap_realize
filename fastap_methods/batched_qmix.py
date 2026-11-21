@@ -78,16 +78,22 @@ class BatchedQMIX:
                                        control=getattr(world_type, 'control', 'team'))
         cfg.n_agents = self.spec.n_agents
         cfg.state_shape = info['state_shape']
-        # Initialize only the CPU RNG, build on CPU, and move the models as a unit.
-        with torch.random.fork_rng(devices=[]):
-            torch.random.default_generator.manual_seed(seed)
-            self.actor = self.spec.build_network().to(self.device)
-            self.mixer = QMixer(cfg)
-            self.online = SequenceQ(self.actor)
-            self.mixer.to(self.device)
-            self.target_actor = deepcopy(self.actor)
-            self.target = SequenceQ(self.target_actor)
-            self.target_mixer = deepcopy(self.mixer)
+        # Historical runs used CPU-seeded initial weights. Device-native runs
+        # draw them on the same GPU used for environment and learner tensors.
+        cfg.initialize_on_device = getattr(cfg, 'initialize_on_device', False)
+        init_device = self.device if cfg.initialize_on_device else torch.device('cpu')
+        with torch.random.fork_rng(devices=[init_device] if init_device.type == 'cuda' else []):
+            if init_device.type == 'cuda':
+                torch.cuda.manual_seed(seed)
+            else:
+                torch.random.default_generator.manual_seed(seed)
+            with init_device:
+                self.actor = self.spec.build_network().to(self.device)
+                self.mixer = QMixer(cfg).to(self.device)
+        self.online = SequenceQ(self.actor)
+        self.target_actor = deepcopy(self.actor)
+        self.target = SequenceQ(self.target_actor)
+        self.target_mixer = deepcopy(self.mixer)
         self.target.requires_grad_(False)
         self.target_mixer.requires_grad_(False)
         self.params = list(chain(self.actor.parameters(), self.mixer.parameters()))
@@ -187,8 +193,12 @@ class BatchedQMIX:
 
     def train_batch(self, world, layout):
         """Read aggregated scalars on the host only once per batch of completed games."""
-        epsilon = self.cfg.epsilon_start - (self.cfg.epsilon_start - self.cfg.epsilon_finish) * min(
-            self.steps / self.cfg.epsilon_anneal_time, 1.0)
+        if self.cfg.initialize_on_device:
+            steps = torch.full((), self.steps, dtype=torch.float64, device=self.device)
+            fraction = (steps / self.cfg.epsilon_anneal_time).clamp_max(1.0)
+        else:
+            fraction = min(self.steps / self.cfg.epsilon_anneal_time, 1.0)
+        epsilon = self.cfg.epsilon_start - (self.cfg.epsilon_start - self.cfg.epsilon_finish) * fraction
         start = perf_counter()
         cuda = self.device.type == 'cuda'
         if cuda:
@@ -215,7 +225,11 @@ class BatchedQMIX:
         statistics = [episodes['filled'].sum(), episodes['reward'].sum(1).mean()]
         if loss is not None:
             statistics.append(loss)
+        if self.cfg.initialize_on_device:
+            statistics.append(epsilon)
         numbers = torch.stack(statistics).detach().cpu().tolist()
+        if self.cfg.initialize_on_device:
+            epsilon = numbers.pop()
         if not all(isfinite(value) for value in numbers):
             raise FloatingPointError(f'Nonfinite batch statistics at {self.steps} training steps')
         batch_steps = int(numbers[0])
