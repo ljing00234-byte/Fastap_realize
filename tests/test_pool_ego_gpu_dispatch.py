@@ -1,12 +1,13 @@
-"""GPU held-out recovery must use the PP run's recorded device and shared monitor."""
+"""Check the training and evaluation dispatch of the pool ego entry points."""
 
 import json
 import os
 from pathlib import Path
 import sys
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -34,6 +35,71 @@ class TimeLimitDispatchTests(unittest.TestCase):
                     team_entry.main()
                 self.assertIs(write.call_args.args[1]["method"]["bootstrap_at_time_limit"], expected)
                 self.assertIs(train_team.call_args.args[2]["bootstrap_at_time_limit"], expected)
+
+
+class PPTrainingTeammateTests(unittest.TestCase):
+    def test_fixed_training_partner_cli_applies_only_to_pp(self):
+        argv = ["pool_ego", str(ROOT / "outputs" / "mock-partner-run"), "--worker", "--training-teammate", "T1"]
+        with patch.object(entry, "train") as train, patch.object(entry, "require_monitored_cuda", return_value="GPU-test"):
+            with patch.object(sys, "argv", [*argv, "--scene", "pp"]):
+                entry.main()
+            self.assertEqual(train.call_args.args[0].training_teammate, "T1")
+            with patch.object(sys, "argv", [*argv, "--scene", "lbf"]), patch.object(sys, "stderr"), \
+                 self.assertRaises(SystemExit):
+                entry.main()
+            self.assertEqual(train.call_count, 1)
+
+    def test_select_training_teammates_keeps_evaluation_pool_intact(self):
+        teammates = {"T2": object(), "T1": object()}
+        self.assertEqual(list(entry.select_training_teammates(teammates, None)), ["T2", "T1"])
+        self.assertEqual(entry.select_training_teammates(teammates, "T1"), {"T1": teammates["T1"]})
+        with self.assertRaises(ValueError):
+            entry.select_training_teammates(teammates, "T9")
+        self.assertEqual(list(teammates), ["T2", "T1"])
+
+    def test_only_training_rollouts_use_the_selected_teammate(self):
+        # Keep T1 away from index zero so that mislabeled sampling counts are detectable.
+        names = ["T2", "T1", "T3", "T4", "T5", "T6", "T7", "T8"]
+        members = [{"id": name, "sha256": name} for name in names]
+        world_type = Mock(episode_limit=25)
+        world_type.return_value.sample_counts.cpu.return_value.tolist.return_value = [1]
+        world_type.return_value.roster_counts.cpu.return_value.tolist.return_value = [1]
+        evaluation = Mock(BOARD_GENERATOR="test-boards", BOOTSTRAP_SEED=1, BOOTSTRAP_RESAMPLES=10)
+        evaluation.evaluate_pool_ego.return_value = {"mean_return": 1.0}
+        learner = Mock(steps=0, episodes=1, updates=0)
+        learner.save_checkpoint.side_effect = lambda path: path
+
+        def finish_rollout(world, layout):
+            learner.steps = 25
+            return {"training_steps": learner.steps}
+
+        learner.train_batch.side_effect = finish_rollout
+        heldout = {"scores": {k: {"mean_return": 1.0} for k in ("initial", "final", "validation_selected")}}
+        with TemporaryDirectory(dir=ROOT / ".tmp") as tmp:
+            directory = Path(tmp)
+            pool = directory / "pool.json"
+            pool.write_text(json.dumps({"members": members, "target_size": len(members)}))
+            paths = [directory / name for name in names]
+            args = SimpleNamespace(scene="pp", num_envs=1, seed=1107, total_steps=25,
+                                   training_teammate="T1", bootstrap_at_time_limit=False,
+                                   run_dir=directory, teammate_pool=pool,
+                                   validation_seed=100, validation_maps=1, heldout_seed=200, heldout_maps=1)
+            with patch.object(entry, "pool_paths", return_value=paths), \
+                 patch("fastap_agents.load_frozen_agent", side_effect=lambda path, device: path.name), \
+                 patch("fastap_methods.batched_qmix.BatchedQMIX", return_value=learner), \
+                 patch.object(entry, "scene_modules", return_value=(world_type, evaluation)), \
+                 patch.object(entry, "check_pp_devices", return_value={}), \
+                 patch.object(entry, "evaluate_final_models", return_value=heldout) as final:
+                entry.train(args, device="cuda:0", gpu_uuid="GPU-test")
+            self.assertEqual(world_type.call_args.kwargs["teammates"], ["T1"])
+            self.assertEqual(list(evaluation.evaluate_pool_ego.call_args.args[2]), names)
+            self.assertEqual(final.call_args.args[2:4], (members, paths))
+            protocol = json.loads((directory / "protocol.json").read_text())
+            self.assertEqual(protocol["training_pool_order"], ["T1"])
+            self.assertEqual(protocol["heldout_episodes_per_policy"], len(names))
+            counts = json.loads((directory / "status.json").read_text())["sampling_counts"]
+            self.assertEqual(counts["T1"], 1)
+            self.assertEqual(sum(counts.values()), 1)
 
 
 class PoolEgoRecoveryDispatchTests(unittest.TestCase):

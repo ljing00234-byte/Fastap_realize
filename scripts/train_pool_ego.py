@@ -47,6 +47,15 @@ SCENE_PROTOCOLS = {
 }
 
 
+def select_training_teammates(teammates, name):
+    """Restrict the training roster while retaining the full evaluation roster."""
+    if name is None:
+        return teammates
+    if name not in teammates:
+        raise ValueError(f"Unknown training teammate {name!r}; available: {', '.join(teammates)}")
+    return {name: teammates[name]}
+
+
 def evaluate_final_models(directory, state, members, paths, first_seed, n_maps, *, scene="lbf", device="cpu"):
     from fastap_agents import load_frozen_agent
 
@@ -202,6 +211,7 @@ def train(args, *, device, gpu_uuid):
     if len(paths) != manifest["target_size"] or len(set(names)) != len(paths) or len(paths) < max(roster_sizes):
         raise ValueError(f"Expected a complete {args.scene} pool with sufficient distinct member IDs")
     teammates = {name: load_frozen_agent(path, device=device) for name, path in zip(names, paths)}
+    training_teammates = select_training_teammates(teammates, args.training_teammate)
 
     agent = load_yaml(ROOT / "configs/agents/drqn.yaml")
     method = load_yaml(ROOT / "configs/methods/qmix.yaml")
@@ -214,11 +224,18 @@ def train(args, *, device, gpu_uuid):
         device_protocol = dict(training_device=device, evaluation_device=device, gpu_uuid=gpu_uuid, physical_gpu_index=2,
                                model_initialization="PyTorch CUDA RNG", board_generator=evaluation.BOARD_GENERATOR,
                                bootstrap_seed=evaluation.BOOTSTRAP_SEED, bootstrap_resamples=evaluation.BOOTSTRAP_RESAMPLES)
-    write_json(directory / "config.json", dict(scene=args.scene, control="ego", device=device,
+    config = dict(scene=args.scene, control="ego", device=device,
                gpu_uuid=gpu_uuid, num_envs=args.num_envs, seed=args.seed, agent=agent, method=method,
-               teammate_pool=str(args.teammate_pool.relative_to(ROOT))))
+               teammate_pool=str(args.teammate_pool.relative_to(ROOT)))
+    scene_protocol = SCENE_PROTOCOLS[args.scene].copy()
+    if pp:
+        scene_protocol["training_pool_order"] = list(training_teammates)
+    if args.training_teammate is not None:
+        config["training_teammate"] = args.training_teammate
+        scene_protocol["teammate_sampling"] = f"one frozen predator ({args.training_teammate}) in every training episode"
+    write_json(directory / "config.json", config)
     write_json(directory / "protocol.json", dict(
-        controlled_slots=[0, 1], **SCENE_PROTOCOLS[args.scene], **device_protocol, episode_limit=world_type.episode_limit,
+        controlled_slots=[0, 1], **scene_protocol, **device_protocol, episode_limit=world_type.episode_limit,
         initial_weights="random",
         paper="https://proceedings.mlr.press/v216/zhang23a.html",
         epymarl_reference="f355a55262ac9afecdb53368fec6337c549cc160",
@@ -242,7 +259,7 @@ def train(args, *, device, gpu_uuid):
 
     update()
     try:
-        world = world_type(args.num_envs, device, teammates=list(teammates.values()),
+        world = world_type(args.num_envs, device, teammates=list(training_teammates.values()),
                            seed=args.seed + 10, teammate_seed=args.seed + 11)
         learner = BatchedQMIX(agent, method, device=device, seed=args.seed, world_type=world_type)
         checkpoints = directory / "checkpoints"
@@ -276,7 +293,8 @@ def train(args, *, device, gpu_uuid):
                        selected_checkpoint=str(selected.relative_to(directory)), best_validation_mean_return=best_return,
                        elapsed_training_seconds=monotonic() - started)
                 next_validation = (learner.steps // validation_interval + 1) * validation_interval
-        counts = dict(zip(names, world.sample_counts.cpu().tolist()))
+        counts = dict.fromkeys(names, 0)
+        counts.update(zip(training_teammates, world.sample_counts.cpu().tolist()))
         roster_counts = world.roster_counts.cpu().tolist()
         if (len(roster_counts) != len(roster_sizes) or len(set(roster_counts)) != 1
                 or sum(roster_counts) != learner.episodes
@@ -287,7 +305,7 @@ def train(args, *, device, gpu_uuid):
         # Re-open published models and score each on the same independent boards.
         if pool_paths(args.teammate_pool, args.scene) != paths or json.loads(args.teammate_pool.read_text()) != manifest:
             raise RuntimeError("Frozen teammate pool changed during training")
-        del learner, world, teammates, validation_boards
+        del learner, world, teammates, training_teammates, validation_boards
         heldout = evaluate_final_models(directory, state, members, paths, args.heldout_seed, args.heldout_maps,
                                        scene=args.scene, device=device if pp else "cpu")
         write_json(directory / "heldout.json", heldout)
@@ -302,6 +320,8 @@ def main():
     parser.add_argument("run_dir", type=project_path)
     parser.add_argument("--scene", choices=SCENE_PROTOCOLS, default="lbf")
     parser.add_argument("--teammate-pool", type=project_path)
+    parser.add_argument("--training-teammate", metavar="ID",
+                        help="PP: train with this frozen teammate and evaluate against the entire pool")
     parser.add_argument("--seed", type=int, default=1107)
     parser.add_argument("--num-envs", type=int, default=32)
     parser.add_argument("--total-steps", type=int, default=2_000_000)
@@ -316,6 +336,8 @@ def main():
                         help="Finish an interrupted final evaluation using the run's recorded device and settings")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.training_teammate is not None and args.scene != "pp":
+        parser.error("--training-teammate requires --scene pp")
     if args.teammate_pool is None:
         args.teammate_pool = ROOT / f"outputs/{args.scene}_teammate_pool_01/pool.json"
     if ROOT / "outputs" not in args.run_dir.parents or ROOT not in args.teammate_pool.parents:

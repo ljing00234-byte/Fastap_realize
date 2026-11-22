@@ -160,6 +160,16 @@ envs/epymarl/bin/python -B scripts/train_pool_ego.py outputs/pp_pool_ego_qmix_gp
 
 模型初始化、开局生成、环境推进、队友推理、经验回放和 QMIX 更新都在物理 GPU 2 上执行。训练 200 万个有效环境步，每 5 万步在同一卡上验证一次。期末让训练好的 ego 和同一次训练的初始 ego 各自与八名队友搭档，在相同的 1,024 个独立开局上测试，每个模型共 8,192 局。GPU 按开局计算配对回报差及其 95% 区间，随后将成绩写入 `heldout.json`。
 
+固定一名队友的对照使用 `--training-teammate T1`。只有 T1 参与训练采样，验证和独立测试始终使用完整队友池。下面的命令复用有限回合混训组的种子、地图和 200 万步预算，两个实验均以最终检查点为主要结果。
+
+```bash
+source scripts/epymarl-env.sh
+envs/epymarl/bin/python -B scripts/train_pool_ego.py outputs/pp_pool_ego_qmix_fixed_t1_1107 --scene pp --training-teammate T1 --no-bootstrap-at-time-limit --seed 1107 --validation-seed 3100000 --heldout-seed 3200000
+envs/epymarl/bin/python -B scripts/compare_pp_ego_training_partners.py outputs/pp_pool_ego_qmix_gpu_timeout_diag_1107 outputs/pp_pool_ego_qmix_fixed_t1_1107 outputs/pp_pool_ego_qmix_fixed_t1_1107/paired_comparison
+```
+
+`paired_comparison/comparison.json` 分别列出 T1、T2–T8 和全池的期末平均回报。95% 区间按地图配对计算，同一张地图上的七名队友在重采样时保持在一起。
+
 ### 生成 CN 队友集合
 
 ```bash
