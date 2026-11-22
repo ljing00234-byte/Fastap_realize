@@ -105,5 +105,13 @@ class ScenarioInterfaceTests(unittest.TestCase):
                         self.assertEqual(runner.t, info["episode_limit"])
                         self.assertEqual(episode["obs"].shape[2], 2 if mode == "ego" else 3)
                         self.assertTrue(torch.isfinite(episode["reward"]).all())
+                        self.assertFalse(episode["terminated"][:, :runner.t - 1].any())
+                        self.assertEqual(episode["terminated"][0, runner.t - 1].item(), int(key == "lbf"))
+                        if key == "lbf":
+                            # Explicitly reproduce the historical continuing target.
+                            args.bootstrap_at_time_limit = True
+                            historical = runner.run(test_mode=True)
+                            self.assertEqual(runner.t, info["episode_limit"])
+                            self.assertFalse(historical["terminated"][:, :runner.t].any())
                     finally:
                         runner.close_env()

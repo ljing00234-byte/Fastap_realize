@@ -12,6 +12,28 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import train_pool_ego as entry
+import train_lbf_cooperation as team_entry
+
+
+class TimeLimitDispatchTests(unittest.TestCase):
+    def test_workers_resolve_and_record_default_and_explicit_timeout_modes(self):
+        run_dir = str(ROOT / "outputs" / "mock-time-limit-run")
+        for scene, flags, expected in (("lbf", [], False), ("lbf", ["--bootstrap-at-time-limit"], True),
+                                       ("pp", [], True), ("pp", ["--no-bootstrap-at-time-limit"], False)):
+            with self.subTest(scene=scene, flags=flags):
+                argv = ["pool_ego", run_dir, "--worker", "--scene", scene, *flags]
+                with patch.object(sys, "argv", argv), patch.object(entry, "train") as train, \
+                     patch.object(entry, "require_monitored_cuda", return_value="GPU-test"):
+                    entry.main()
+                self.assertIs(train.call_args.args[0].bootstrap_at_time_limit, expected)
+
+                with patch.object(sys, "argv", [*argv, "--single-teammate"]), \
+                     patch.object(team_entry, "require_monitored_cuda", return_value="GPU-test"), \
+                     patch.object(team_entry, "write_json") as write, \
+                     patch("fastap_methods.single_teammate.run_single_team") as train_team:
+                    team_entry.main()
+                self.assertIs(write.call_args.args[1]["method"]["bootstrap_at_time_limit"], expected)
+                self.assertIs(train_team.call_args.args[2]["bootstrap_at_time_limit"], expected)
 
 
 class PoolEgoRecoveryDispatchTests(unittest.TestCase):

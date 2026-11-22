@@ -4,6 +4,7 @@ from envs import REGISTRY as environments
 from runners import REGISTRY as runners
 from runners.episode_runner import EpisodeRunner
 
+from fastap_methods.time_limit import default_bootstrap_at_time_limit
 from .registry import make_env
 
 
@@ -11,7 +12,13 @@ class FastapEpisodeRunner(EpisodeRunner):
     def run(self, test_mode=False):
         # Upstream resets the environment inside run(), without passing test_mode.
         self.env.set_test_mode(test_mode)
-        return super().run(test_mode=test_mode)
+        episode = super().run(test_mode=test_mode)
+        if not getattr(self.args, "bootstrap_at_time_limit",
+                       default_bootstrap_at_time_limit(self.args.env_args["key"])):
+            # Upstream stores the observation after the last transition at t.
+            # A finite horizon ends the TD target on the transition into it.
+            episode["terminated"][:, self.t - 1] = 1
+        return episode
 
 
 def make_legacy_lbf(key, **kwargs):

@@ -15,7 +15,7 @@ from time import sleep
 from gpu2_monitor import ROOT, write_json
 
 
-BASE_RUNS = {"lbf": "outputs/lbf_single_T1_full_01", "pp": "outputs/pp_single_T1_horizon25_01",
+BASE_RUNS = {"lbf": "outputs/lbf_single_T1_horizon25_01", "pp": "outputs/pp_single_T1_horizon25_01",
              "cn": "outputs/cn_single_T1_horizon25_01"}
 EVIDENCE = {"lbf": ("evidence_for_any_food", "evidence_for_full_completion"),
             "pp": ("evidence_for_teammate", "evidence_for_team"),
@@ -51,8 +51,9 @@ def train_member(pool, name, seed, cfg):
                "--eval-maps", str(cfg["eval_maps"]),
                "--total-steps", str(cfg["total_step_budget"]), "--heldout-seed", str(cfg["heldout_seed"]),
                "--seed", str(seed)]
-    if not cfg["method"].get("bootstrap_at_time_limit", True):
-        command.append("--no-bootstrap-at-time-limit")
+    # Every member follows its reference T1, including runs saved before this flag existed.
+    bootstrap = cfg["method"].get("bootstrap_at_time_limit", True)
+    command.append("--bootstrap-at-time-limit" if bootstrap else "--no-bootstrap-at-time-limit")
     while True:
         with log.open("a+") as stream:
             stream.seek(0, 2)
@@ -113,17 +114,21 @@ def generate(pool, base, size):
                     training_seeds=seeds, per_member_steps=cfg["total_step_budget"], eval_maps=cfg["eval_maps"],
                     num_envs=cfg["num_envs"], member_test_seed=cfg["heldout_seed"],
                     crossplay_first_seed=CROSSPLAY_FIRST_SEED[scene], crossplay_maps=256)
-    if scene in ("pp", "cn"):
-        protocol["bootstrap_at_time_limit"] = cfg["method"].get("bootstrap_at_time_limit", True)
+    protocol["bootstrap_at_time_limit"] = cfg["method"].get("bootstrap_at_time_limit", True)
     if scene == "cn":
         reference_protocol = read(base / "protocol.json")
         for key in ("episode_limit", "n_egos", "n_teammates", "n_landmarks", "collision_penalty",
                     "primary_endpoint", "secondary_endpoint"):
             protocol[key] = reference_protocol[key]
     previous = pool / "protocol.json"
-    if previous.is_file() and read(previous) != protocol:
-        raise ValueError("Existing pool has a different protocol")
-    write_json(previous, protocol)
+    if previous.is_file():
+        recorded = read(previous)
+        if scene == "lbf":
+            recorded.setdefault("bootstrap_at_time_limit", True)
+        if recorded != protocol:
+            raise ValueError("Existing pool has a different protocol")
+    else:
+        write_json(previous, protocol)
     manifest_path = pool / "pool.json"
     manifest = (read(manifest_path) if manifest_path.is_file() else
                 dict(format=f"{scene}-teammate-pool-v1", scene=scene, role=2, target_size=size, members=[]))
@@ -167,18 +172,24 @@ def main():
     parser.add_argument("--base-run", type=Path)
     parser.add_argument("--size", type=int, default=8)
     args = parser.parse_args()
-    pool, base = ((ROOT / p).resolve() for p in (args.run_dir, args.base_run or BASE_RUNS[args.scene]))
-    if (args.size < 2 or any(ROOT / "outputs" not in p.parents for p in (pool, base))
-            or base == pool or base in pool.parents or pool in base.parents):
+    pool = (ROOT / args.run_dir).resolve()
+    if args.size < 2 or ROOT / "outputs" not in pool.parents:
         parser.error("Choose separate project output directories and at least two members")
     if os.environ.get("FASTAP_ROOT") != str(ROOT):
         parser.error("Source scripts/epymarl-env.sh before launch")
-    if read(base / "config.json")["scene"] != args.scene:
-        parser.error("The reference run must match --scene")
     pool.mkdir(parents=True, exist_ok=True)
     sys.path.insert(0, str(ROOT))
     with (pool / ".pool.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        existing = pool / "protocol.json"
+        base_path = args.base_run or (read(existing)["base_run"] if existing.is_file() else BASE_RUNS[args.scene])
+        base = (ROOT / base_path).resolve()
+        if ROOT / "outputs" not in base.parents or base == pool or base in pool.parents or pool in base.parents:
+            parser.error("Choose separate project output directories for the pool and its reference run")
+        if not (base / "config.json").is_file():
+            parser.error(f"Train the reference T1 in {base} first, or supply its directory with --base-run")
+        if read(base / "config.json")["scene"] != args.scene:
+            parser.error("The reference run must match --scene")
         if (pool / "status.json").is_file() and read(pool / "status.json")["phase"] == "complete":
             if read(pool / "protocol.json")["target_size"] != args.size or read(pool / "protocol.json")["base_run"] != str(base.relative_to(ROOT)):
                 parser.error("Completed pool belongs to a different experiment")

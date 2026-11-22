@@ -57,11 +57,11 @@ envs/epymarl/bin/python -B scripts/train_lbf_cooperation.py outputs/cooperation_
 
 ### 生成和检验一名 LBF 队友
 
-在标准随机地图上用 vanilla QMIX 从头联合训练三个角色，默认训练 200 万个有效环境步。每 5 万步在固定验证集上按三份采完率、平均回报的顺序选择一个检查点。运行命令中的输出目录需为空。
+在标准随机地图上用 vanilla QMIX 从头联合训练三个角色，默认训练 200 万个有效环境步。每局最多 25 步，第 25 步采到的食物照常得分，该步的训练目标只计当步奖励。提前采完全部食物也立即结束回合。每 5 万步在固定验证集上按三份采完率、平均回报的顺序选择一个检查点。运行命令中的输出目录需为空。
 
 ```bash
 source scripts/epymarl-env.sh
-envs/epymarl/bin/python -B scripts/train_lbf_cooperation.py outputs/single_T1 --single-teammate --num-envs 32 --eval-maps 256 --heldout-seed 720000
+envs/epymarl/bin/python -B scripts/train_lbf_cooperation.py outputs/lbf_single_T1_horizon25_01 --single-teammate --num-envs 32 --eval-maps 256 --heldout-seed 720000
 ```
 
 输出目录的 `T1/` 含可直接加载的权重，使用 `load_frozen_agent(path).policy_factory(2)` 取得第 3 个角色。选定后在原版 CPU 环境的 1,024 张独立地图上固定两名搭档，对照训练后的 T1、合法随机动作和初始 T1，并记录初始整队的成绩。`protocol.json` 记录事先设定的判据，`heldout.json` 记录逐图回报、至少采到一份和三份全采完的配对比较。
@@ -94,14 +94,14 @@ envs/epymarl/bin/python -B scripts/train_lbf_cooperation.py outputs/cn_single_T1
 
 ### 生成 LBF 队友集合
 
-默认生成 8 个单队友策略。T1 复用已验证的权重，其余成员使用不同随机种子，各在物理 GPU 2 上训练 200 万步。每张棋盘上有两名搭档和一名队友。模型、环境、奖励和用于选检查点的验证集与 T1 相同。
+默认生成 8 个单队友策略。新队友池使用上一步训练的 T1，其余成员沿用 T1 的时限设定，以不同种子在物理 GPU 2 上各训练 200 万步。续跑原有队友池时从该池的 `protocol.json` 读取 T1 来源。也可用 `--base-run` 显式指定已验证的 T1。
 
 ```bash
 source scripts/epymarl-env.sh
-envs/epymarl/bin/python -B scripts/generate_lbf_pool.py outputs/lbf_teammate_pool_01 --size 8
+envs/epymarl/bin/python -B scripts/generate_lbf_pool.py outputs/lbf_teammate_pool_horizon25_01 --size 8
 ```
 
-每完成一名成员的 1,024 图独立测试，`pool.json` 就会增加一条记录，分别标明能否证实采到食物和采完全图的贡献。实验保留预定种子的全部结果。后续 ego 训练可用 `--teammate-pool outputs/lbf_teammate_pool_01/pool.json` 读取启动时已发布的成员，也可用 `--teammate-checkpoint` 指定个别成员。
+每完成一名成员的 1,024 图独立测试，`pool.json` 就会增加一条记录，分别标明能否证实采到食物和采完全图的贡献。实验保留预定种子的全部结果。新池完成后，向 ego 训练入口传入 `--teammate-pool outputs/lbf_teammate_pool_horizon25_01/pool.json` 即可使用。下面的 ego 超时对照沿用原有的冻结池 `outputs/lbf_teammate_pool_01/pool.json`。
 
 全体完成后，`crossplay.json` 记录在另外 256 张相同地图上互换队友的成绩，每行固定一对原搭档，每列更换第 3 个角色。文件也记录了各个队友在 T1 原团队同一批观测及动作历史上选择不同动作的比例。
 
@@ -109,14 +109,14 @@ envs/epymarl/bin/python -B scripts/generate_lbf_pool.py outputs/lbf_teammate_poo
 
 ```bash
 source scripts/epymarl-env.sh
-envs/epymarl/bin/python -B scripts/train_lbf_pool_ego.py outputs/lbf_pool_ego_qmix_01
+envs/epymarl/bin/python -B scripts/train_lbf_pool_ego.py outputs/lbf_pool_ego_qmix_finite_01
 ```
 
 两个 ego 从零训练并共享 GRU 权重。棋盘为 6×6，有三份食物、3×3 局部视野和 25 步时限。每局抽取一名或两名冻结队友，局内固定。训练预算为 200 万个有效环境步，主要结果使用期末检查点的原始团队回报。[LBF 场景及 QMIX 网络](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=3) · [原论文图 3](https://proceedings.mlr.press/v216/zhang23a/zhang23a.pdf#page=7)
 
 作者未公布两种阵容的比例和队友权重。本实验每批 32 局两种人数各半，从 T1–T8 等概率抽取队友。双队友从池中不放回抽取，两个角色各用自己的观测和记忆。两种阵容分别报告回报，并以等权均值汇总。每约 5 万步验证一次，期末使用另外 1,024 个地图种子评估，同时保留初始权重及验证集表现最好的检查点供对照。
 
-五种子实验使用 `1107、2207、3307、4407、5507`，各自从零训练 200 万步，依次对应 `outputs/lbf_pool_ego_qmix_01` 至 `_05`。对齐每 5 万步的验证记录后，绘制五条曲线、等权均值和跨种子样本标准差。期末独立测试使用各自的最终检查点。
+已完成的五种子实验使用 `1107、2207、3307、4407、5507`，均采用超时继续估值的历史设置，各自从零训练 200 万步，依次对应 `outputs/lbf_pool_ego_qmix_01` 至 `_05`。复现这五组时显式传入 `--bootstrap-at-time-limit`。对齐每 5 万步的验证记录后，绘制五条曲线、等权均值和跨种子样本标准差。期末独立测试使用各自的最终检查点。
 
 ```bash
 source scripts/epymarl-env.sh
@@ -128,7 +128,7 @@ envs/lbf-plot/bin/python -B scripts/compare_lbf_ego_seeds.py outputs/lbf_pool_eg
 
 图和统计表写入 `outputs/lbf_pool_ego_qmix_five_seeds/`。验证曲线与原论文图 3(a) 对照，期末独立测试与表 1 的静态队友行对照。
 
-对照第 25 步超时处理时，使用相同的训练种子和队友池。默认做法在超时时保留下一状态的估计价值，加上 `--no-bootstrap-at-time-limit` 后，超时那一步只用当步的标准化奖励作为训练目标。两种策略按同一规则累计前 25 步的原始团队回报。
+新的 LBF ego 训练默认在第 25 步结束估值，末步 TD 目标只使用当步的标准化奖励。测试按实际采食计算最多 25 步的原始团队回报。下例使用同一队友池与种子 1107，对比两种末步目标。
 
 ```bash
 source scripts/epymarl-env.sh
@@ -151,7 +151,7 @@ T1 复用通过检验的 25 步终止模型。T2–T8 使用不同种子，各�
 
 ### 训练 PP 的 QMIX ego
 
-两个 ego 捕食者从零开始训练，每局从冻结的 T1–T8 中等概率抽取第三名捕食者，固定配合 25 步。团队回报按所有捕食者与猎物的接触次数累计，每次得 10 分。ego 沿用 LBF 正式基线的训练目标，在第 25 步超时时保留下一状态的估值。
+两个 ego 捕食者从零开始训练，每局从冻结的 T1–T8 中等概率抽取第三名捕食者，固定配合 25 步。团队回报按所有捕食者与猎物的接触次数累计，每次得 10 分。下列 PP 原始对照在第 25 步仍计入下一状态估值，有限回合对照使用 `--no-bootstrap-at-time-limit`。
 
 ```bash
 source scripts/epymarl-env.sh

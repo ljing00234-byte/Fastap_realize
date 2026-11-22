@@ -14,6 +14,7 @@ from fastap_agents import get_agent_backend
 from fastap_agents.batched import agent_inputs, select_actions, SequenceQ
 from fastap_scenarios.torch_foraging import TorchForaging
 from .qmix import _checkpoint
+from .time_limit import default_bootstrap_at_time_limit
 
 
 class EpisodeReplay:
@@ -63,7 +64,8 @@ class BatchedQMIX:
             require_monitored_cuda()
         info = {key: getattr(world_type, key) for key in ("n_agents", "n_actions", "state_shape", "obs_shape")}
         cfg = self.cfg = SimpleNamespace(**method_config)
-        cfg.bootstrap_at_time_limit = getattr(cfg, 'bootstrap_at_time_limit', True)
+        cfg.bootstrap_at_time_limit = getattr(cfg, 'bootstrap_at_time_limit',
+                                              default_bootstrap_at_time_limit(world_type.scene_key))
         if (cfg.name, cfg.learner, cfg.mixer, cfg.action_selector) != (
                 'qmix', 'q_learner', 'qmix', 'epsilon_greedy'):
             raise ValueError("This trainer requires the epsilon-greedy QMIX learner")

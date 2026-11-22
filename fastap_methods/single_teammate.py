@@ -11,6 +11,7 @@ import numpy as np
 from .cooperation_validation import evaluate_cooperation
 from .response_eval import evaluate_pair
 from .batched_qmix import BatchedQMIX
+from .time_limit import default_bootstrap_at_time_limit
 from .predator_prey_eval import evaluate_pp_cases, validate_pp
 from .cooperative_navigation_eval import check_cn_adapter, evaluate_cn_cases, validate_cn
 from fastap_scenarios.cooperative_navigation import DEFAULT_COLLISION_PENALTY
@@ -86,7 +87,7 @@ def run_single_team(args, agent_cfg, method_cfg, device, parity_check, write_jso
     validate_particle = {"pp": validate_pp, "cn": validate_cn}.get(scene)
     protocol = dict(scene=scene, start_distribution="random", fixed_teammate_slot=2, episode_limit=world_type.episode_limit,
                     training_steps=args.total_steps, training_seed=args.seed, num_envs=args.num_envs,
-                    bootstrap_at_time_limit=method_cfg.get("bootstrap_at_time_limit", True),
+                    bootstrap_at_time_limit=method_cfg.get("bootstrap_at_time_limit", default_bootstrap_at_time_limit(scene)),
                     validation_seed=650000, validation_maps=n_validate, test_seed_start=test_seeds.start,
                     test_maps=len(test_seeds), validation_interval=50000,
                     selection=["full_completion_rate", "mean_return"],

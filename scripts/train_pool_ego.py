@@ -305,8 +305,8 @@ def main():
     parser.add_argument("--seed", type=int, default=1107)
     parser.add_argument("--num-envs", type=int, default=32)
     parser.add_argument("--total-steps", type=int, default=2_000_000)
-    parser.add_argument("--no-bootstrap-at-time-limit", action="store_false", dest="bootstrap_at_time_limit",
-                        help="Treat the 25-step timeout as terminal in the QMIX training target")
+    parser.add_argument("--bootstrap-at-time-limit", action=argparse.BooleanOptionalAction,
+                        help="Include next-state value at timeout (default: off for LBF, on for PP)")
     parser.add_argument("--validation-seed", type=int, default=2_100_000)
     parser.add_argument("--validation-maps", type=int, default=64)
     parser.add_argument("--heldout-seed", type=int, default=2_200_000)
@@ -373,8 +373,11 @@ def main():
         return
     sys.path.insert(0, str(ROOT))
     uuid = require_monitored_cuda()
+    from fastap_methods.time_limit import default_bootstrap_at_time_limit
     import torch
     torch.set_num_threads(1)
+    if args.bootstrap_at_time_limit is None:
+        args.bootstrap_at_time_limit = default_bootstrap_at_time_limit(args.scene)
     train(args, device="cuda:0", gpu_uuid=uuid)
 
 

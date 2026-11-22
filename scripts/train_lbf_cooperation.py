@@ -172,8 +172,8 @@ def main():
     mode.add_argument("--single-teammate", action="store_true",
                       help="train one team for 2M steps on standard random starts and independently test slot 2")
     parser.add_argument("--seed", type=int, default=101)
-    parser.add_argument("--no-bootstrap-at-time-limit", action="store_false", dest="bootstrap_at_time_limit",
-                        help="use only the immediate reward when the episode times out")
+    parser.add_argument("--bootstrap-at-time-limit", action=argparse.BooleanOptionalAction,
+                        help="include next-state value at timeout (default: off for LBF, on for PP/CN)")
     parser.add_argument("--expected-peak-mib", type=int, default=BASELINE_PEAK)
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
@@ -201,13 +201,15 @@ def main():
         return
     sys.path.insert(0, str(ROOT))
     uuid = require_monitored_cuda()
+    from fastap_methods.time_limit import default_bootstrap_at_time_limit
     import torch
     import yaml
     torch.set_num_threads(1)
     def config(name):
         return yaml.safe_load((ROOT / "configs" / name).read_text())
     agent, method = config("agents/drqn.yaml"), config("methods/qmix.yaml")
-    method["bootstrap_at_time_limit"] = args.bootstrap_at_time_limit
+    method["bootstrap_at_time_limit"] = (default_bootstrap_at_time_limit(args.scene)
+                                         if args.bootstrap_at_time_limit is None else args.bootstrap_at_time_limit)
     settings = dict(scene=args.scene, gpu_uuid=uuid, device="cuda:0", num_envs=args.num_envs,
                     seed=args.seed, total_step_budget=args.total_steps, eval_maps=args.eval_maps,
                     heldout_seed=args.heldout_seed, benchmark_only=args.benchmark_only,

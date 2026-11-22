@@ -102,8 +102,9 @@ class BatchedQMIXTests(unittest.TestCase):
         actions = F.pad(sample['actions'], (0, 0, 0, 1))
         batch['actions'] = actions.unsqueeze(-1)
         batch['actions_onehot'] = F.one_hot(actions, 6).float()
-        for key in ('reward', 'terminated', 'filled'):
+        for key in ('reward', 'filled'):
             batch[key] = F.pad(sample[key], (0, 1)).unsqueeze(-1)
+        batch['terminated'] = F.pad(sample['terminated'] | sample['truncated'], (0, 1)).unsqueeze(-1)
         actor_config = yaml.safe_load((PROJECT / 'configs/agents/drqn.yaml').read_text())
         args = SimpleNamespace(**vars(learner.cfg), **actor_config, n_actions=6,
                                learner_log_interval=2000, use_cuda=False)
@@ -157,7 +158,7 @@ class BatchedQMIXTests(unittest.TestCase):
         learner.clear_replay()
         self.assertEqual(learner.train_batch(world, 'approach')['optimizer_updates'], 2)
 
-    def test_fill_mask_keeps_terminal_transition_and_bootstraps_truncation(self):
+    def test_lbf_target_keeps_last_reward_and_only_bootstraps_before_timeout(self):
         # Force lane zero to terminate at step 1 and lane one to time out at 25.
         class MixedEndWorld(TorchForaging):
             def step(self, actions):
@@ -171,8 +172,26 @@ class BatchedQMIXTests(unittest.TestCase):
         self.assertTrue(sample['terminated'][0, 0])
         self.assertEqual(sample['filled'][1].sum(), 25)
         self.assertFalse(sample['terminated'][1, -1])
+        self.assertTrue(sample['truncated'][1, -1])
         self.assertEqual(sample['obs'].size(1), 26)
         self.assertTrue(sample['available'][:, :-1].gather(-1, sample['actions'].unsqueeze(-1)).all())
+
+        # Zero current Q and set target Q to 2. The two lanes have 26 real
+        # transitions: one early completion, 24 continuing steps and a timeout.
+        sample['reward'].zero_()
+        sample['reward'][0, 0] = 1
+        sample['reward'][1, -1] = 1 / 3
+        legacy = self.make_learner(bootstrap_at_time_limit=True)
+        for model, last_target_continues in ((learner, False), (legacy, True)):
+            with torch.no_grad():
+                for param in (*model.mixer.parameters(), *model.target_mixer.parameters()):
+                    param.zero_()
+                model.target_mixer.V[-1].bias.fill_(2)
+            continuation = 2 * model.cfg.gamma
+            last_target = 1 / 3 + continuation * last_target_continues
+            expected_loss = (1 + 24 * continuation**2 + last_target**2) / 26
+            with self.subTest(bootstrap=last_target_continues):
+                self.assertAlmostEqual(model._update(sample).item(), expected_loss, places=5)
 
 
 if __name__ == '__main__':

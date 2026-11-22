@@ -66,18 +66,22 @@ class TeammatePoolTests(unittest.TestCase):
         self.assertGreater(result["crossplay"][0][0]["mean_return"], 0)
         self.assertEqual(result["action_disagreement"], [[0, 1], [1, 0]])
 
-    def test_particle_member_launch_inherits_the_finite_horizon(self):
+    def test_member_launch_inherits_the_reference_timeout_rule(self):
         cfg = dict(num_envs=32, eval_maps=256, total_step_budget=2000000,
                    heldout_seed=990000, method={"bootstrap_at_time_limit": False})
         with TemporaryDirectory(dir=ROOT / ".tmp") as tmp, patch("generate_teammate_pool.subprocess.run") as run:
             run.return_value.returncode = 0
-            for scene in ("pp", "cn"):
+            for scene in ("lbf", "pp", "cn"):
                 with self.subTest(scene=scene):
                     train_member(Path(tmp), "T2", 202, dict(cfg, scene=scene))
                     args = run.call_args.args[0]
                     self.assertEqual(args[args.index("--scene")+1], scene)
                     self.assertEqual(args[args.index("--seed")+1], "202")
                     self.assertIn("--no-bootstrap-at-time-limit", args)
+            for old_method in ({}, {"bootstrap_at_time_limit": True}):
+                with self.subTest(old_method=old_method):
+                    train_member(Path(tmp), "T2", 202, dict(cfg, scene="lbf", method=old_method))
+                    self.assertIn("--bootstrap-at-time-limit", run.call_args.args[0])
 
     def test_crossplay_replaces_only_slot_two_and_uses_shared_histories(self):
         spec = SimpleNamespace(scene_key="lbf", n_agents=3, n_actions=6, control="team",

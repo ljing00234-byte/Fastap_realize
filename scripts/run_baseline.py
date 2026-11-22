@@ -69,6 +69,7 @@ def train(args):
     sys.path.insert(0, str(ROOT))
     import torch
     from fastap_methods import TRAINERS
+    from fastap_methods.time_limit import default_bootstrap_at_time_limit
     from gpu2_monitor import require_monitored_cuda
 
     uuid = require_monitored_cuda()
@@ -76,6 +77,9 @@ def train(args):
     scene = load_yaml(ROOT / "configs/scenarios" / f"{args.scene}.yaml")
     agent = load_yaml(args.agent_config)
     method = load_yaml(args.method_config)
+    if args.bootstrap_at_time_limit is not None:
+        method["bootstrap_at_time_limit"] = args.bootstrap_at_time_limit
+    method.setdefault("bootstrap_at_time_limit", default_bootstrap_at_time_limit(args.scene))
     if args.control:
         scene["env_args"]["control"] = args.control
     if args.teammates is not None:
@@ -107,6 +111,8 @@ def main():
     parser.add_argument("--scene", required=True, choices=sorted(p.stem for p in (ROOT / "configs/scenarios").glob("*.yaml")))
     parser.add_argument("--agent-config", type=project_path, default=ROOT / "configs/agents/drqn.yaml")
     parser.add_argument("--method-config", type=project_path, default=ROOT / "configs/methods/qmix.yaml")
+    parser.add_argument("--bootstrap-at-time-limit", action=argparse.BooleanOptionalAction,
+                        help="Include the estimated future value at timeout (default off in LBF)")
     parser.add_argument("--control", choices=("team", "ego"), help="which cooperative roles to train")
     parser.add_argument("--teammates", type=int, help="restrict to a supported team size")
     source = parser.add_mutually_exclusive_group()
