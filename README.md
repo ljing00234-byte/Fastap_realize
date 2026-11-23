@@ -2,6 +2,12 @@
 
 本仓库用于复现论文 *Fast Teammate Adaptation in the Presence of Sudden Policy Change*。
 
+## QMIX 基线模块
+
+在 LBF、PP 和 CN 中，先联合训练三名智能体，把第 3 名冻结为队友。用不同种子生成 8 名队友后，每局从池中抽取搭档，训练两个 ego。模块 README 提供这三个步骤的命令，以及智能体网络、QMIX 更新和队友生成的源码入口。
+
+[QMIX 模块与运行说明](qmix_baseline/) · [LBF 队友互换热力图](qmix_baseline/figures/lbf-crossplay.png)
+
 ## 游戏场景搭建模块
 
 本模块按论文搭建了协作采食（LBF）、追捕（PP）和协作导航（CN），实现了三个场景的观测、动作和奖励规则。三个游戏共用一套接口，方便后续训练队友和比较算法。
@@ -10,14 +16,14 @@
 
 ## 智能体与训练方法
 
-**第一条基线是 vanilla QMIX。** 训练时，QMIX 使用全局状态将各角色的动作价值组合为团队价值。执行时，每个角色根据自己的局部历史选择合法动作。LBF、PP 和 CN 的回放和评估记录原始团队奖励。生成冻结队友时，TD 更新也使用原始奖励。下述 LBF 和 PP 的 ego 实验在计算 TD 目标前标准化奖励。[Fastap 论文](https://proceedings.mlr.press/v216/zhang23a.html) · [QMIX 原文](https://proceedings.mlr.press/v80/rashid18a.html)
+**第一条基线是 vanilla QMIX。** 训练时，QMIX 使用全局状态将各角色的动作价值组合为团队价值。执行时，每个角色根据自己的局部历史选择合法动作。LBF、PP 和 CN 的回放和评估记录原始团队奖励。生成冻结队友时，TD 更新也使用原始奖励。三个场景的队友池 ego 训练都在计算 TD 目标前标准化奖励。[Fastap 论文](https://proceedings.mlr.press/v216/zhang23a.html) · [QMIX 原文](https://proceedings.mlr.press/v80/rashid18a.html)
 
 | 模块 | 输入与职责 | 扩展入口 |
 | --- | --- | --- |
 | 智能体 | 本地观测、上一步动作、原始角色编号 → 各动作的 Q 值。默认共享一个 64 维 GRU，各角色单独保存记忆 | 新网络通过 `register_agent_backend` 注册训练控制器、权重说明和冻结策略加载器。[agent 模块](fastap_agents/) · [agent 配置](configs/agents/drqn.yaml) |
 | 训练方法 | 从完整回合采样，利用全局状态、联合动作和团队奖励更新网络。默认使用单调混合网络、Double Q、经验回放和目标网络 | 新方法提供与 `train_qmix` 相同的调用入口，加入 `TRAINERS`，用方法 YAML 选择。[方法模块](fastap_methods/) · [QMIX 配置](configs/methods/qmix.yaml) |
 
-默认折扣为 0.99，批量为 32 个回合，学习率为 0.0005，每 200 次优化更新同步目标网络。正式配置的 200 万个环境步对应原文基准学习曲线的横轴范围。原文没有单列 vanilla QMIX 的全部网络开关，本实现显式启用 GRU 和上一动作输入，并关闭 EPyMARL 的奖励标准化。队友生成的训练步数可用 `--steps` 单独指定。[论文补充材料](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf)
+默认折扣为 0.99，批量为 32 个回合，学习率为 0.0005，每 200 次优化更新同步目标网络。正式配置的 200 万个环境步对应原文基准学习曲线的横轴范围。原文没有单列 vanilla QMIX 的全部网络开关，本实现显式启用 GRU 和上一动作输入。下方基础示例使用 `run_baseline.py --steps` 指定步数，新模块的训练命令使用 `--total-steps`。[论文补充材料](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf)
 
 下面两条命令演示 LBF 的完整接口。第一条训练三人团队；第二条从其检查点加载第 3 个角色作为冻结队友，训练两个 ego。示例使用 125 步的小批量验证配置，每次运行使用新的输出目录。
 
