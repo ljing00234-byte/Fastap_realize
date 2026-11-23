@@ -25,12 +25,18 @@ def scene_modules(scene):
         from fastap_methods import pp_pool_ego_eval
         from fastap_scenarios.torch_pp_ego import TorchPPEgo
         return TorchPPEgo, pp_pool_ego_eval
+    if scene == "cn":
+        from fastap_methods import cn_pool_ego_eval
+        from fastap_scenarios.torch_cn_ego import TorchCNEgo
+        return TorchCNEgo, cn_pool_ego_eval
     raise ValueError(f"Unsupported pool ego scene: {scene}")
 
 
+GPU_EVALUATION_SCENES = {"pp", "cn"}
+
 SCENE_PROTOCOLS = {
     "lbf": dict(
-        possible_frozen_slots=[2, 3], training_start_distribution="random LBF boards",
+        training_roster_sizes=[1, 2], possible_frozen_slots=[2, 3], training_start_distribution="random LBF boards",
         teammate_sampling="half of every rollout batch has one teammate; half has two distinct teammates; "
                           "uniform draw without replacement per episode, fixed until reset",
         local_choices=["equal proportions of the two roster sizes", "pair two independently generated single-teammate "
@@ -38,12 +44,20 @@ SCENE_PROTOCOLS = {
                        "validation and held-out map counts, pairing schedule and scoring cadence"],
         evaluation="greedy, equally weighted roster sizes, stationary teams; identical boards across checkpoints"),
     "pp": dict(
-        possible_frozen_slots=[2], training_start_distribution="random PP positions, standard evading prey",
+        training_roster_sizes=[1], possible_frozen_slots=[2], training_start_distribution="random PP positions, standard evading prey",
         teammate_sampling="uniform draw of one frozen predator per episode, fixed until reset",
         local_choices=["fixed teammate pool", "parallel environments and RNG seeds",
                        "validation and held-out map counts and scoring cadence"],
         evaluation="greedy, same starts for every teammate and checkpoint, equally weighted stationary teammates",
         scoring="10 per predator-prey contact on each timestep, summed once across all three predators for 25 steps"),
+    "cn": dict(
+        training_roster_sizes=[1], possible_frozen_slots=[2], n_landmarks=4, collision_penalty=1.0,
+        training_start_distribution="random agent and landmark positions",
+        teammate_sampling="uniform draw of one frozen teammate per episode, fixed until reset",
+        local_choices=["single-teammate roster from the published CN pool", "parallel environments and RNG seeds",
+                       "validation and held-out map counts and scoring cadence"],
+        evaluation="greedy, same boards for every teammate and checkpoint, equally weighted stationary teammates",
+        scoring="negative sum of nearest-agent distances for four landmarks, minus one per colliding pair per step"),
 }
 
 
@@ -60,10 +74,10 @@ def evaluate_final_models(directory, state, members, paths, first_seed, n_maps, 
     from fastap_agents import load_frozen_agent
 
     _, evaluation = scene_modules(scene)
-    pp = scene == "pp"
-    if pp and device != "cuda:0":
-        raise ValueError("PP final evaluation requires the monitored GPU 2 worker")
-    device_args = {"device": device} if pp else {}
+    gpu_evaluation = scene in GPU_EVALUATION_SCENES
+    if gpu_evaluation and device != "cuda:0":
+        raise ValueError(f"{scene.upper()} final evaluation requires the monitored GPU 2 worker")
+    device_args = {"device": device} if gpu_evaluation else {}
     mates = {m["id"]: load_frozen_agent(path, device=device) for m, path in zip(members, paths)}
     boards = evaluation.make_evaluation_boards(first_seed, n_maps, **device_args)
     scores = {}
@@ -75,11 +89,11 @@ def evaluate_final_models(directory, state, members, paths, first_seed, n_maps, 
         else:
             ego = load_frozen_agent(directory / path, device=device)
             scores[label] = evaluation.evaluate_pool_ego(ego.model, ego.spec, mates, boards,
-                                                         **({"return_device_tensors": True} if pp else {}))
+                                                         **({"return_device_tensors": True} if gpu_evaluation else {}))
             del ego
     paired = {name: evaluation.compare_ego_returns(scores[name], scores["initial"], **device_args)
               for name in ("final", "validation_selected")}
-    if pp:
+    if gpu_evaluation:
         scores = {name: evaluation.serialize_scores(report) for name, report in scores.items()}
     return dict(primary_checkpoint=checkpoints["final"], validation_selected_checkpoint=checkpoints["validation_selected"],
                 first_seed=first_seed, shared_map_seeds_per_roster=n_maps,
@@ -93,7 +107,7 @@ def completion_fields(heldout):
                 initial_mean_return=scores["initial"]["mean_return"])
 
 
-def check_pp_devices(learner, world, teammates, boards):
+def check_particle_devices(learner, world, teammates, boards):
     tensors = {
         "actor": learner.actor.parameters(), "mixer": learner.mixer.parameters(),
         "target_actor": learner.target_actor.parameters(), "target_mixer": learner.target_mixer.parameters(),
@@ -102,6 +116,9 @@ def check_pp_devices(learner, world, teammates, boards):
         "validation_boards": [boards["positions"], boards["velocity"]],
         "td_reward_statistics": [learner.reward_stats.mean, learner.reward_stats.var],
     }
+    if "landmarks" in boards:
+        tensors["environment"].append(world.game.landmarks)
+        tensors["validation_boards"].append(boards["landmarks"])
     if learner.optimizer.state:
         tensors["optimizer"] = (v for state in learner.optimizer.state.values() for v in state.values()
                                 if hasattr(v, "device"))
@@ -109,7 +126,7 @@ def check_pp_devices(learner, world, teammates, boards):
     for name, values in tensors.items():
         devices = {str(value.device) for value in values}
         if devices != {"cuda:0"}:
-            raise RuntimeError(f"PP requires GPU-resident {name}, found {devices}")
+            raise RuntimeError(f"Expected GPU-resident {name}, found {devices}")
         evidence[name] = "cuda:0"
     return evidence
 
@@ -131,8 +148,8 @@ def recover_heldout(directory, *, device="cpu"):
         protocol = json.loads((directory / "protocol.json").read_text())
         seed, budget = config["seed"], protocol["total_step_budget"]
         scene = config["scene"]
-        if scene == "pp" and (device != "cuda:0" or protocol.get("evaluation_device") != device):
-            raise ValueError("PP recovery requires its recorded GPU evaluation protocol")
+        if scene in GPU_EVALUATION_SCENES and (device != "cuda:0" or protocol.get("evaluation_device") != device):
+            raise ValueError(f"{scene.upper()} recovery requires its recorded GPU evaluation protocol")
         if (scene not in SCENE_PROTOCOLS or (config["control"], config["method"]["name"]) != ("ego", "qmix")
                 or budget != config["method"]["t_max"]
                 or (protocol["training_seed"], protocol["training_board_seed"], protocol["training_teammate_seed"])
@@ -147,8 +164,7 @@ def recover_heldout(directory, *, device="cpu"):
             raise ValueError("Recorded pool does not match the published teammate weights")
         first_seed, n_maps = protocol["heldout_first_seed"], protocol["heldout_map_seeds_per_roster"]
         val_seed, val_maps = protocol["validation_first_seed"], protocol["validation_map_seeds_per_roster"]
-        from fastap_scenarios import SCENARIOS
-        n_rosters = len(SCENARIOS[scene].teammate_counts)
+        n_rosters = len(SCENE_PROTOCOLS[scene]["training_roster_sizes"])
         if (min(first_seed, val_seed) < 0 or min(n_maps, val_maps) < 1
                 or max(first_seed, val_seed) < min(first_seed + n_maps, val_seed + val_maps)
                 or n_rosters * len(members) * n_maps != protocol["heldout_episodes_per_policy"]):
@@ -196,14 +212,13 @@ def recover_heldout(directory, *, device="cpu"):
 def train(args, *, device, gpu_uuid):
     from fastap_agents import load_frozen_agent
     from fastap_methods.batched_qmix import BatchedQMIX
-    from fastap_scenarios import SCENARIOS
 
     directory = args.run_dir
     world_type, evaluation = scene_modules(args.scene)
-    pp = args.scene == "pp"
-    if pp and device != "cuda:0":
-        raise ValueError("PP training and evaluation require the monitored GPU 2 worker")
-    roster_sizes = SCENARIOS[args.scene].teammate_counts
+    gpu_evaluation = args.scene in GPU_EVALUATION_SCENES
+    if gpu_evaluation and device != "cuda:0":
+        raise ValueError(f"{args.scene.upper()} training and evaluation require the monitored GPU 2 worker")
+    roster_sizes = SCENE_PROTOCOLS[args.scene]["training_roster_sizes"]
     paths = pool_paths(args.teammate_pool, args.scene)
     manifest = json.loads(args.teammate_pool.read_text())
     members = manifest["members"]
@@ -219,7 +234,7 @@ def train(args, *, device, gpu_uuid):
     method.update(t_max=args.total_steps, bootstrap_at_time_limit=args.bootstrap_at_time_limit, standardise_rewards=True,
                   test_interval=validation_interval, test_nepisode=len(roster_sizes) * len(names) * args.validation_maps)
     device_protocol = {}
-    if pp:
+    if gpu_evaluation:
         method["initialize_on_device"] = True
         device_protocol = dict(training_device=device, evaluation_device=device, gpu_uuid=gpu_uuid, physical_gpu_index=2,
                                model_initialization="PyTorch CUDA RNG", board_generator=evaluation.BOARD_GENERATOR,
@@ -228,7 +243,7 @@ def train(args, *, device, gpu_uuid):
                gpu_uuid=gpu_uuid, num_envs=args.num_envs, seed=args.seed, agent=agent, method=method,
                teammate_pool=str(args.teammate_pool.relative_to(ROOT)))
     scene_protocol = SCENE_PROTOCOLS[args.scene].copy()
-    if pp:
+    if gpu_evaluation:
         scene_protocol["training_pool_order"] = list(training_teammates)
     if args.training_teammate is not None:
         config["training_teammate"] = args.training_teammate
@@ -265,7 +280,7 @@ def train(args, *, device, gpu_uuid):
         checkpoints = directory / "checkpoints"
         learner.save_checkpoint(checkpoints / "0")
         validation_boards = evaluation.make_evaluation_boards(args.validation_seed, args.validation_maps,
-                                                              **({"device": device} if pp else {}))
+                                                              **({"device": device} if gpu_evaluation else {}))
         best_return = float("-inf")
         selected = None
         next_validation = validation_interval
@@ -274,14 +289,14 @@ def train(args, *, device, gpu_uuid):
         with (directory / "metrics.jsonl").open("x", buffering=1) as log:
             while learner.steps < args.total_steps:
                 batch = learner.train_batch(world, "random")
-                if pp and "compute_devices" not in state:
-                    update(compute_devices=check_pp_devices(learner, world, teammates, validation_boards))
+                if gpu_evaluation and "compute_devices" not in state:
+                    update(compute_devices=check_particle_devices(learner, world, teammates, validation_boards))
                 log.write(json.dumps(dict(kind="train", **batch), allow_nan=False) + "\n")
                 if learner.steps < next_validation and learner.steps < args.total_steps:
                     continue
                 checkpoint = learner.save_checkpoint(checkpoints / str(learner.steps))
                 report = evaluation.evaluate_pool_ego(learner.actor, learner.spec, teammates, validation_boards,
-                                                      **({"return_device_tensors": True} if pp else {}))
+                                                      **({"return_device_tensors": True} if gpu_evaluation else {}))
                 metrics = {k: v for k, v in report.items() if k != "episode_returns"}
                 log.write(json.dumps(dict(kind="validation", training_steps=learner.steps,
                                           **metrics), allow_nan=False) + "\n")
@@ -307,7 +322,7 @@ def train(args, *, device, gpu_uuid):
             raise RuntimeError("Frozen teammate pool changed during training")
         del learner, world, teammates, training_teammates, validation_boards
         heldout = evaluate_final_models(directory, state, members, paths, args.heldout_seed, args.heldout_maps,
-                                       scene=args.scene, device=device if pp else "cpu")
+                                       scene=args.scene, device=device if gpu_evaluation else "cpu")
         write_json(directory / "heldout.json", heldout)
         update(**completion_fields(heldout))
     except BaseException as exc:
@@ -326,7 +341,7 @@ def main():
     parser.add_argument("--num-envs", type=int, default=32)
     parser.add_argument("--total-steps", type=int, default=2_000_000)
     parser.add_argument("--bootstrap-at-time-limit", action=argparse.BooleanOptionalAction,
-                        help="Include next-state value at timeout (default: off for LBF, on for PP)")
+                        help="Include next-state value at timeout (default: off for LBF and CN, on for PP)")
     parser.add_argument("--validation-seed", type=int, default=2_100_000)
     parser.add_argument("--validation-maps", type=int, default=64)
     parser.add_argument("--heldout-seed", type=int, default=2_200_000)
@@ -353,14 +368,14 @@ def main():
             parser.error("--finish-heldout reads its settings from the run directory and accepts no training flags")
         config = json.loads((args.run_dir / "config.json").read_text())
         device = "cpu"
-        if config["scene"] == "pp":
+        if config["scene"] in GPU_EVALUATION_SCENES:
             state = json.loads((args.run_dir / "status.json").read_text())
             if state["phase"] == "complete" and (args.run_dir / "heldout.json").is_file():
                 print("Final evaluation already complete", flush=True)
                 return
             protocol = json.loads((args.run_dir / "protocol.json").read_text())
             if protocol.get("evaluation_device") != "cuda:0":
-                parser.error("This PP run predates the GPU evaluation protocol; its original map stream differs")
+                parser.error("This run predates the GPU evaluation protocol; its original map stream differs")
             if not args.worker:
                 monitor = json.loads((args.run_dir / "monitor.json").read_text())
                 if not monitor.get("finished_at"):
@@ -399,7 +414,7 @@ def main():
     import torch
     torch.set_num_threads(1)
     if args.bootstrap_at_time_limit is None:
-        args.bootstrap_at_time_limit = default_bootstrap_at_time_limit(args.scene)
+        args.bootstrap_at_time_limit = False if args.scene == "cn" else default_bootstrap_at_time_limit(args.scene)
     train(args, device="cuda:0", gpu_uuid=uuid)
 
 

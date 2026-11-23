@@ -17,6 +17,20 @@ import train_lbf_cooperation as team_entry
 
 
 class TimeLimitDispatchTests(unittest.TestCase):
+    def test_cn_ego_uses_published_single_teammate_roster_and_finite_horizon(self):
+        run_dir = str(ROOT / "outputs" / "mock-cn-run")
+        argv = ["pool_ego", run_dir, "--scene", "cn", "--worker"]
+        with patch.object(sys, "argv", argv), patch.object(entry, "train") as train, \
+             patch.object(entry, "require_monitored_cuda", return_value="GPU-test"):
+            entry.main()
+        args = train.call_args.args[0]
+        self.assertIs(args.bootstrap_at_time_limit, False)
+        self.assertEqual(args.teammate_pool, ROOT / "outputs/cn_teammate_pool_01/pool.json")
+        self.assertEqual(entry.SCENE_PROTOCOLS["cn"]["training_roster_sizes"], [1])
+        world, evaluation = entry.scene_modules("cn")
+        self.assertEqual((world.scene_key, world.n_agents, world.episode_limit), ("cn", 2, 25))
+        self.assertIs(evaluation.TorchCNEgo, world)
+
     def test_workers_resolve_and_record_default_and_explicit_timeout_modes(self):
         run_dir = str(ROOT / "outputs" / "mock-time-limit-run")
         for scene, flags, expected in (("lbf", [], False), ("lbf", ["--bootstrap-at-time-limit"], True),
@@ -88,7 +102,7 @@ class PPTrainingTeammateTests(unittest.TestCase):
                  patch("fastap_agents.load_frozen_agent", side_effect=lambda path, device: path.name), \
                  patch("fastap_methods.batched_qmix.BatchedQMIX", return_value=learner), \
                  patch.object(entry, "scene_modules", return_value=(world_type, evaluation)), \
-                 patch.object(entry, "check_pp_devices", return_value={}), \
+                 patch.object(entry, "check_particle_devices", return_value={}), \
                  patch.object(entry, "evaluate_final_models", return_value=heldout) as final:
                 entry.train(args, device="cuda:0", gpu_uuid="GPU-test")
             self.assertEqual(world_type.call_args.kwargs["teammates"], ["T1"])
