@@ -2,6 +2,66 @@
 
 本仓库用于复现论文 *Fast Teammate Adaptation in the Presence of Sudden Policy Change*。
 
+## Fastap 的 agent 与训练方法
+
+Fastap 在 LBF、PP、CN 中训练两个可控角色（ego），让它们根据各自的局部观测和动作历史推断当前队友的行为。训练器接收 agent 和带簇编号的完整回合，负责经验回放上的价值学习和上下文学习。执行时只需加载两个角色的局部策略。[原论文 §4](https://proceedings.mlr.press/v216/zhang23a/zhang23a.pdf#page=4) · [agent](fastap_agents/fastap.py) · [训练器](fastap_methods/fastap_learner.py)
+
+### 运行与加载
+
+在项目根目录运行。正式入口默认通过项目监控器绑定物理 GPU 2。下面的 CPU 命令用小配置验证从队友分簇到策略导出的流程。
+
+```bash
+source scripts/epymarl-env.sh
+envs/epymarl/bin/python -B scripts/train_fastap.py outputs/fastap_lbf --scene lbf
+envs/epymarl/bin/python -B scripts/train_fastap.py outputs/fastap_lbf_smoke --scene lbf --device cpu --smoke
+```
+
+将 `--scene` 改为 `pp` 或 `cn` 并选择新的输出目录即可切换场景。默认从 `outputs/{scene}_teammate_pool_01/pool.json` 加载该场景冻结的队友，也可用 `--teammate-pool` 指定其他池的清单。网络结构和训练参数分别配置。[agent 配置](configs/agents/fastap.yaml) · [方法配置](configs/methods/fastap.yaml)
+
+按论文算法 1 将队友生成穿插在 ego 训练中时，选择 `--teammate-source online`。下面的 LBF 示例会逐轮训练至多 8 个新队友组。每组的全队 QMIX 训练预算为 200 万个环境步，8 组对应约 1,600 万个额外环境步。ego 训练和分簇探测另行计数。
+
+```bash
+source scripts/epymarl-env.sh
+envs/epymarl/bin/python -B scripts/train_fastap.py outputs/fastap_lbf_online --scene lbf \
+  --teammate-source online --online-groups 8 --teammate-training-steps 2000000
+```
+
+在线模式每轮用独立种子调用本仓库的全队 QMIX，再从训练后的团队中取出队友角色，冻结权重后收集轨迹、进行 CRP 分簇。LBF、CN 按组序交替训练一名或两名队友，PP 每组固定一名队友捕食者。在线评估从当时已生成的组中抽样。默认冻结池模式直接使用已有权重，LBF、CN 的双人组由两个独立训练过的角色配对构成。[全队 QMIX](fastap_methods/qmix.py) · [补充材料算法 1](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=6)
+
+每次运行的 `config.json` 保存实际配置，`metrics.jsonl` 记录过程指标，`summary.json` 汇总结果。`checkpoints/<步数>/training.pt` 保存训练状态，同目录的 `fastap_policy.pt` 只含局部策略的结构与权重。可在独立进程加载最近一次导出的策略。
+
+```python
+from pathlib import Path
+from fastap_agents import FastapPolicy
+
+checkpoints = Path("outputs/fastap_lbf/checkpoints")
+latest = max((p for p in checkpoints.iterdir() if p.name.isdigit()), key=lambda p: int(p.name))
+policy = FastapPolicy.load(latest, device="cpu")
+```
+
+`policy.act(obs, prev_actions, available, hidden)` 返回合法贪心动作与新的循环记忆。三个输入张量的形状分别为 `[批量, ego 数, 观测维数]`、`[批量, ego 数, 动作数]` 和 `[批量, ego 数, 动作数]`。开局传 `hidden=None` 和全零上一动作向量，此后传入实际执行动作的 one-hot 编码。回合内更换队友时延续 ego 记忆。默认按高斯分布采样上下文，单步调试时传 `sample=False` 可使用均值。
+
+### 分簇、训练目标与奖励
+
+1. **用轨迹给队友组分簇。** 对第 $k$ 组收集探测回合，8 层 Transformer 将每条完整轨迹编码为 16 维向量，取组内均值 $v_k$。隐藏维数为 16 的 GRU 解码器根据状态历史与候选行为向量预测队友动作。已有簇的候选中心为 $(n_m\bar v_m+v_k)/(n_m+1)$，新簇用 $v_k$。把解码器给出的轨迹似然分别乘以 CRP 先验 $n_m/(k-1+\alpha)$ 或 $\alpha/(k-1+\alpha)$，选择后验最大的簇并更新其中心和组数。代码在对数域累加有效动作的似然。原文式（4）的模型训练目标为 $-\log\mathbb{E}[p(\tau^A\mid\tau^S,E(\tau))]$。[原文式（1）–（4）](https://proceedings.mlr.press/v216/zhang23a/zhang23a.pdf#page=4) · [分簇实现](fastap_methods/fastap_crp.py)
+2. **集中训练、分散执行。** 两个 ego 分别用双层 MLP 和 64 维 GRU 将自己的历史编码为高斯分布，重参数化采样得到 $e_i$。各自的循环 Q 网络依据自身历史与 $e_i$ 给合法动作打分。训练时另用全局状态与受控角色的上一联合动作编码 $z$，用 $[s,z]$ 调节 QMIX 的单调混合网络。每步以环境返回的原始团队奖励 $r$ 计算 TD 目标，本实现将回合时限作为有限时域终点，该步目标为 $r$。[原文 §4.2–4.3](https://proceedings.mlr.press/v216/zhang23a/zhang23a.pdf#page=5) · [网络结构](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=5)
+3. **学习可辨别的上下文。** GCE 和 LCE 分别对全局、各局部编码器计算簇内平方距离与簇间 RBF 核的负对数行列式。簇中心使用滑动均值，旧均值的权重为 $\eta$。变分网络以 $z$ 和采样前的局部历史预测 $e_i$，互信息项按式（7）–（8）最大化下界，故最小化损失时取负号。重建项用 $e_i$ 预测当前在场队友的观测与动作，分别计算均方误差和分类负对数似然。全局编码器接受 TD 和 GCE 的梯度，各局部编码器接受 TD、LCE、互信息与重建项的梯度。[原文式（5）–（11）](https://proceedings.mlr.press/v216/zhang23a/zhang23a.pdf#page=5) · [补充材料 A.2–A.3](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=2)
+
+三个场景直接复用已有环境的团队奖励。LBF 将当步采到的食物等级之和除以开局食物总等级。PP 每次捕食者与猎物接触给团队加 10 分。CN 取各地标到最近在场角色的距离之和的负值，再加碰撞罚项。本仓库对每对碰撞角色扣 1 分，论文未给出该系数。[环境奖励与配置](#fastap-的三个游戏场景) · [补充材料 B.2](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=4)
+
+| 附录表 1 参数 | LBF | PP | CN |
+| --- | ---: | ---: | ---: |
+| CRP 浓度 $\alpha$ | 0.5 | 2.5 | 2.5 |
+| 每轮引入组数 $L$ | 4 | 1 | 1 |
+| RBF 系数 $\kappa$ / 滑动均值系数 $\eta$ | 80 / 0.01 | 80 / 0.01 | 80 / 0.01 |
+| GCE / LCE 权重 | 1 / 1 | 0.4 / 0.4 | 0.4 / 0.4 |
+| 互信息 / 重建权重 | 0.001 / 0.1 | 0.001 / 0.2 | 0.001 / 0.2 |
+| 局部 / 全局上下文维数 | 4 / 6 | 16 / 20 | 4 / 6 |
+
+**引入频率与探测。** 默认开局引入首批，之后每 5 万个 ego 交互步引入下一批，至候选组用尽或 ego 训练结束。冻结池模式在 LBF、CN 中将池中相邻队友轮转配成双人组。每组用随机合法 ego 动作探测 8 局，分簇模型在历次探测数据上更新 64 次再为新组分簇。引入间隔、探测规模和离散动作进入高斯 CRP 解码器时的 one-hot 表示是本实现的取值。[补充材料算法 1](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=6) · [论文超参数表](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=8)
+
+**训练与评估口径。** 默认训练 200 万个 ego 环境步，折扣为 0.99，Adam 学习率为 0.0005。训练采用算法 2 的局内固定组。优先为新簇积累回放，预热完成后均匀抽簇再在簇内抽组。每轮从每个活跃簇采 32 个回合，先逐簇计算 TD 损失，各更新一次局部 Q 网络和混合网络。随后固定刚更新的价值网络，用所有簇的 TD 与辅助目标训练全局、局部编码器和辅助网络。每完成 200 轮同步目标网络。评估在配对的新开局上分别测试固定队友和局内重抽队友。后者每次从 5 到 8 的整数间均匀抽取等待步数，到期重抽。两种设置分别报告原始团队回报，衡量同一候选池的局内适应能力。[补充材料算法 2–3](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=7)
+
 ## QMIX 基线模块
 
 在 LBF、PP 和 CN 中，先联合训练三名智能体，把第 3 名冻结为队友。用不同种子生成 8 名队友后，每局从池中抽取搭档，训练两个 ego。模块 README 提供这三个步骤的命令，以及智能体网络、QMIX 更新和队友生成的源码入口。

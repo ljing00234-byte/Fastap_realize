@@ -1,0 +1,172 @@
+"""Fastap's incremental teammate clustering (Eqs. 1–4 and Algorithm 1)."""
+
+from math import isfinite, log
+
+import torch
+from torch import nn
+from torch.distributions import Normal
+from torch.nn import functional as F
+from torch.nn.utils.rnn import pad_sequence
+
+
+class BehaviorModel(nn.Module):
+    """Eight-layer trajectory Transformer and 16-unit recurrent Gaussian decoder."""
+
+    def __init__(self, state_dim, n_actions, n_teammates):
+        super().__init__()
+        self.n_actions, self.n_teammates = n_actions, n_teammates
+        self.width = 16
+        action_dim = n_actions * n_teammates
+        self.token = nn.Linear(state_dim + action_dim, self.width)
+        # The paper specifies the number of layers and the 16-dimensional v.
+        # Use four heads, a 64-unit FFN and masked mean pooling for the readout.
+        self.layers = nn.ModuleList(nn.TransformerEncoderLayer(
+            self.width, nhead=4, dim_feedforward=64, dropout=0., batch_first=True)
+            for _ in range(8))
+        self.gru = nn.GRU(state_dim + self.width, 16, batch_first=True)
+        self.gaussian = nn.Linear(16, 2 * action_dim)
+
+    def encode(self, states, actions, slots, filled):
+        """Embed s0, a0, ..., sT; the terminal state is a real token."""
+        onehot = F.one_hot(actions.masked_fill(~slots, 0), self.n_actions).to(states.dtype)
+        onehot = onehot.masked_fill(~slots.unsqueeze(-1), 0).flatten(-2)
+        previous = F.pad(onehot, (0, 0, 1, 0))
+        valid_states = F.pad(filled, (1, 0), value=True)
+        tokens = self.token(torch.cat((states, previous), dim=-1))
+        positions = torch.arange(states.shape[1], device=states.device, dtype=states.dtype)
+        frequencies = torch.arange(0, self.width, 2, device=states.device, dtype=states.dtype)
+        angles = positions[:, None] * (10000. ** (-frequencies / self.width))
+        tokens = tokens + torch.stack((angles.sin(), angles.cos()), dim=-1).flatten(-2)
+        for layer in self.layers:
+            tokens = layer(tokens, src_key_padding_mask=~valid_states)
+        return tokens.masked_fill(~valid_states.unsqueeze(-1), 0).sum(1) / valid_states.sum(1, keepdim=True)
+
+    def trajectory_log_prob(self, states, actions, slots, filled, behavior):
+        """Log product across timesteps and real teammate action dimensions (Eq. 3)."""
+        history = torch.cat((states[:, :-1], behavior.unsqueeze(1).expand(-1, actions.size(1), -1)), -1)
+        decoded, _ = self.gru(history)
+        mean, scale_logits = self.gaussian(decoded).chunk(2, dim=-1)
+        scale = F.softplus(scale_logits) + 1e-4
+        active = slots & filled.unsqueeze(-1)
+        target = F.one_hot(actions.masked_fill(~active, 0), self.n_actions).to(states.dtype)
+        scores = Normal(mean, scale).log_prob(target.flatten(-2)).reshape_as(target)
+        return scores.masked_fill(~active.unsqueeze(-1), 0).sum((1, 2, 3))
+
+
+def _collate(probes, device):
+    """Pad only the sampled probe trajectories; histories may have different horizons."""
+    return [pad_sequence(series, batch_first=True).to(device) for series in zip(*probes)]
+
+
+class TeammateCRP:
+    """Sequential MAP assignments to an unbounded set of teammate clusters.
+
+    The small strategy probes are kept on CPU. Each model update trains on a
+    minibatch from the union of previously seen and current group trajectories.
+    """
+
+    def __init__(self, state_dim, n_actions, n_teammates, *, alpha, device='cpu', lr=.0005,
+                 minibatch_size=32):
+        if not (alpha > 0 and isfinite(alpha) and lr > 0 and minibatch_size > 0):
+            raise ValueError("Invalid CRP concentration or optimizer settings")
+        self.alpha = alpha
+        self.device = torch.device(device)
+        self.minibatch_size = minibatch_size
+        self.model = BehaviorModel(state_dim, n_actions, n_teammates).to(self.device)
+        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        self.assignments = {}
+        self.counts = []
+        self.centers = []
+        self._probes = []
+        self.last_model_loss = None
+
+    def _unpack(self, batch):
+        valid = batch['filled'].bool().cpu()
+        if not valid.numel() or not valid[:, 0].all() or (valid[:, 1:] & ~valid[:, :-1]).any():
+            raise ValueError("CRP needs a nonempty prefix of valid transitions for every probe")
+        state = batch['state'].detach().cpu()
+        actions = batch['teammate_actions'].detach().cpu()
+        slots = batch['teammate_mask'].detach().bool().cpu()
+        if (state.shape[:2] != (valid.size(0), valid.size(1) + 1)
+                or actions.shape != (*valid.shape, self.model.n_teammates) or slots.shape != actions.shape):
+            raise ValueError("Inconsistent state, action or mask shapes in CRP probes")
+        active = slots & valid.unsqueeze(-1)
+        if ((actions[active] < 0) | (actions[active] >= self.model.n_actions)).any():
+            raise ValueError("A present teammate action is out of range")
+        if not active.any((1, 2)).all():
+            raise ValueError("Each CRP trajectory needs at least one observed teammate action")
+        # Clone compact slices to avoid retaining padded batches or other replay data.
+        return [(state[i, :length + 1].clone(), actions[i, :length].clone(),
+                 slots[i, :length].clone(), valid[i, :length].clone())
+                for i, length in enumerate(valid.sum(1).tolist())]
+
+    def _fit(self, probes, steps):
+        self.model.train()
+        for _ in range(steps):
+            indices = torch.randperm(len(probes), device='cpu')[:self.minibatch_size].tolist()
+            sample = _collate([probes[i] for i in indices], self.device)
+            embedding = self.model.encode(*sample)
+            log_likelihood = self.model.trajectory_log_prob(*sample, embedding)
+            # Eq. 4 places the trajectory expectation INSIDE the logarithm.
+            loss = log(len(indices)) - torch.logsumexp(log_likelihood, dim=0)
+            self.optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 10., error_if_nonfinite=True)
+            self.optimizer.step()
+        self.last_model_loss = loss.detach().item()
+
+    @torch.no_grad()
+    def _assign(self, group):
+        self.model.eval()
+        # The current group may itself exceed one training minibatch.
+        batches = [group[start:start + self.minibatch_size]
+                   for start in range(0, len(group), self.minibatch_size)]
+        vector = sum(self.model.encode(*_collate(probes, self.device)).sum(0)
+                     for probes in batches) / len(group)
+        candidates = [(n * center + vector) / (n + 1) for n, center in zip(self.counts, self.centers)]
+        candidates.append(vector)
+        # The common CRP normalizer K+alpha cancels in the MAP. Independent
+        # trajectories from the new group contribute additive log evidence.
+        scores = vector.new_tensor([*self.counts, self.alpha], dtype=torch.float64).log()
+        for probes in batches:
+            sample = _collate(probes, self.device)
+            for i, center in enumerate(candidates):
+                evidence = self.model.trajectory_log_prob(*sample, center.expand(len(probes), -1))
+                scores[i] += evidence.double().sum()
+        if not scores.isfinite().all():
+            raise FloatingPointError("Nonfinite predictive likelihood in CRP")
+        label = scores.argmax().item()
+        return label, candidates[label].detach()
+
+    def add_group(self, name, batch, *, model_steps=1):
+        if name in self.assignments:
+            raise ValueError(f"Teammate group already assigned: {name}")
+        if not isinstance(model_steps, int) or model_steps < 1:
+            raise ValueError("At least one behavior-model update is required before assignment")
+        group = self._unpack(batch)
+        self._fit(self._probes + group, model_steps)
+        label, center = self._assign(group)
+        if label == len(self.counts):
+            self.counts.append(1)
+            self.centers.append(center)
+        else:
+            self.counts[label] += 1
+            self.centers[label] = center
+        self._probes.extend(group)
+        self.assignments[name] = label
+        return label
+
+    def state_dict(self):
+        return dict(model=self.model.state_dict(), optimizer=self.optimizer.state_dict(),
+                    assignments=dict(self.assignments), counts=list(self.counts), centers=list(self.centers),
+                    probes=list(self._probes), alpha=self.alpha, minibatch_size=self.minibatch_size,
+                    last_model_loss=self.last_model_loss)
+
+    def load_state_dict(self, saved):
+        self.model.load_state_dict(saved['model'])
+        self.optimizer.load_state_dict(saved['optimizer'])
+        self.alpha, self.minibatch_size = saved['alpha'], saved['minibatch_size']
+        self.assignments, self.counts = dict(saved['assignments']), list(saved['counts'])
+        self.centers = [center.to(self.device) for center in saved['centers']]
+        self._probes = [tuple(field.cpu() for field in probe) for probe in saved['probes']]
+        self.last_model_loss = saved['last_model_loss']

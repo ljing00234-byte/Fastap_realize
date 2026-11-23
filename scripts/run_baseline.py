@@ -1,7 +1,6 @@
 """Compose a game, local agent and training method; run them on monitored GPU 2."""
 
 import argparse
-import hashlib
 import json
 from pathlib import Path
 import sys
@@ -22,21 +21,9 @@ def load_yaml(path):
 
 
 def pool_paths(manifest_path, scene):
-    manifest = json.loads(manifest_path.read_text())
-    if (manifest.get("format"), manifest.get("scene"), manifest.get("role")) != (
-            f"{scene}-teammate-pool-v1", scene, 2) or scene not in ("lbf", "pp", "cn"):
-        raise ValueError("Incompatible teammate pool for this scene")
-    paths = []
-    for member in manifest["members"]:
-        path = (manifest_path.parent / member["path"]).resolve()
-        if manifest_path.parent not in path.parents or path in paths:
-            raise ValueError("Invalid or duplicate member path")
-        if hashlib.sha256((path / "agent.th").read_bytes()).hexdigest() != member["sha256"]:
-            raise ValueError(f"Frozen actor checksum mismatch for {member['id']}")
-        paths.append(path)
-    if not paths:
-        raise ValueError("The pool does not have a published member yet")
-    return paths
+    from fastap_scenarios.fastap_rollout import verified_pool_members
+
+    return [path for _, path in verified_pool_members(manifest_path, scene)]
 
 
 def frozen_groups(paths, scene):
@@ -86,14 +73,21 @@ def train(args):
         scene["env_args"]["n_teammates"] = args.teammates
     if args.switch_interval:
         scene["env_args"]["switch_interval"] = args.switch_interval
-    if args.smoke:
+    if args.smoke and method["name"] == "fastap":
+        from fastap_methods.fastap_training import SMOKE_SETTINGS
+        method.update(SMOKE_SETTINGS)
+    elif args.smoke:
         method.update(t_max=125, batch_size=2, buffer_size=8, test_nepisode=2,
                       test_interval=75, save_model_interval=125, learner_log_interval=1)
     if args.steps is not None:
         method["t_max"] = args.steps
     trainer = TRAINERS[method["name"]]
     paths = pool_paths(args.teammate_pool, args.scene) if args.teammate_pool else args.teammate_checkpoint
-    groups = frozen_groups(paths, scene) if paths else None
+    if method["name"] == "fastap" and args.teammate_pool:
+        from fastap_scenarios.fastap_rollout import load_fastap_groups
+        groups = load_fastap_groups(args.scene, args.teammate_pool)
+    else:
+        groups = frozen_groups(paths, scene) if paths else None
     config = dict(scene=scene, agent=agent, method=method, seed=args.seed, smoke=args.smoke,
                   teammate_checkpoints=[str(p.relative_to(ROOT)) for p in paths],
                   gpu_uuid=uuid)

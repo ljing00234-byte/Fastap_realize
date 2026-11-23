@@ -1,0 +1,28 @@
+name: fastap
+# Supplementary Table 1 (L is the number of groups admitted per round).
+scenes:
+  lbf: {alpha: 0.5, groups_per_round: 4, alpha_gce: 1.0, alpha_lce: 1.0, alpha_rec: 0.1}
+  pp:  {alpha: 2.5, groups_per_round: 1, alpha_gce: 0.4, alpha_lce: 0.4, alpha_rec: 0.2}
+  cn:  {alpha: 2.5, groups_per_round: 1, alpha_gce: 0.4, alpha_lce: 0.4, alpha_rec: 0.2}
+kappa: 80.0
+eta: 0.01
+alpha_mi: 0.001
+gamma: 0.99
+lr: 0.0005
+grad_norm_clip: 10.0
+target_interval: 200
+bootstrap_at_time_limit: false
+epsilon_start: 1.0
+epsilon_finish: 0.05
+epsilon_anneal_time: 50000
+batch_size: 32  # complete episodes per active cluster
+buffer_size: 5000  # total CPU replay capacity across active clusters
+t_max: 2000000
+test_nepisode: 20
+test_interval: 50000
+save_model_interval: 50000
+switch_interval: [5, 8]
+# Reproduction choices for the existing frozen population.
+group_interval_steps: 50000
+probe_episodes: 8
+crp_model_steps: 64

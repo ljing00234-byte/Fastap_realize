@@ -104,28 +104,38 @@ class OpenTeamEnv(_AgentView):
         self.groups = tuple(teammate_groups)
         if not self.groups or len({g.name for g in self.groups}) != len(self.groups):
             raise ValueError("Provide at least one teammate group, with distinct group names")
+        self.set_switch_interval(switch_interval)
+        super().__init__(world_factory, seed)
+        self._done = True
+        self._policies = ()
+        self.group_index = None
+        self.group_name = None
+        self.events = []
+
+    def set_switch_interval(self, switch_interval):
         if switch_interval is not None:
             low, high = map(index, switch_interval)
             if not 1 <= low <= high:
                 raise ValueError("switch_interval must be None or positive inclusive bounds [low, high]")
             switch_interval = low, high
         self.switch_interval = switch_interval
-        super().__init__(world_factory, seed)
-        self._done = True
-        self._policies = ()
-        self.group_name = None
-        self.events = []
 
     @property
     def n_teammates(self):
         return len(self._policies)
 
-    def _sample_group(self, step):
+    def _sample_group(self, step, group_index=None):
         # Algorithm 3 resamples from the whole pool, including the current group.
-        group = self.groups[self._stream.group_rng.integers(len(self.groups))]
+        if group_index is None:
+            group_index = self._stream.group_rng.integers(len(self.groups))
+        group_index = index(group_index)
+        if not 0 <= group_index < len(self.groups):
+            raise ValueError("Group index outside the available teammate pool")
+        group = self.groups[group_index]
         # A recurrent teammate that stays in the same group keeps its trajectory.
         if step == 0 or group.name != self.group_name:
             self._policies = tuple(factory() for factory in group.policies)
+        self.group_index = group_index
         self.group_name = group.name
         self.events.append(dict(step=step, group=group.name, n_teammates=self.n_teammates))
 
@@ -135,10 +145,11 @@ class OpenTeamEnv(_AgentView):
             return step + int(self._stream.wait_rng.integers(low, high + 1))
         return None
 
-    def reset(self):
+    def reset(self, *, group_index=None):
         self._begin_episode()
         self.events = []
-        self._sample_group(step=0)
+        self.last_teammate_obs = None
+        self._sample_group(step=0, group_index=group_index)
         self.world.reset(n_teammates=self.n_teammates)
         self._switch_step = self._next_switch(0)
         self._done = False
@@ -159,6 +170,7 @@ class OpenTeamEnv(_AgentView):
             joint_actions.append(action)
         reward, self._done, info = self.world.step(joint_actions)
         self.last_joint_actions = tuple(joint_actions)
+        self.last_teammate_obs = obs[self.n_agents:]
         if not self._done and self.world.current_step == self._switch_step:
             # Apply a group change before the controller reads its next observation.
             self._sample_group(self.world.current_step)

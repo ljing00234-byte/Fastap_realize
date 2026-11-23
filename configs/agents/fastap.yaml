@@ -1,0 +1,7 @@
+agent: fastap
+hidden_dim: 64
+# Supplementary Table 1, ordered as local e and global z.
+context_dims:
+  lbf: {local_dim: 4, global_dim: 6}
+  pp:  {local_dim: 16, global_dim: 20}
+  cn:  {local_dim: 4, global_dim: 6}

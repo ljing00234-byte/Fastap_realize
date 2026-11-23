@@ -5,6 +5,12 @@ from scripts import gpu2_monitor as monitor
 
 
 class ProcessOwnershipTests(unittest.TestCase):
+    def test_fastap_reserves_its_declared_peak_until_cuda_has_allocated_it(self):
+        script = str(monitor.ROOT / "scripts/train_fastap.py").encode()
+        cmdline = b"\0".join([b"python", script, b"--worker", b"--expected-peak-mib", b"6000"])
+        with patch.object(monitor.Path, "read_bytes", return_value=cmdline):
+            self.assertEqual(monitor.pending_allocations({41: 1024}), 4976)
+
     def test_exited_pid_remains_in_first_device_query(self):
         state = {"compute_processes": {
             41: {"executable": "[Not Found]", "used_mib": 200},
