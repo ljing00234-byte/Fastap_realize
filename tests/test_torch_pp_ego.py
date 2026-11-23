@@ -80,3 +80,40 @@ class PredatorPreyEgoTests(unittest.TestCase):
         torch.testing.assert_close(a.state(), b.state())
         self.assertFalse(torch.equal(a.teammate_ids, b.teammate_ids))
         self.assertEqual(a.roster_counts.tolist(), [32])
+
+    def test_within_episode_redraw_matches_scalar_recurrent_controller(self):
+        groups = [TeammateGroup(str(i), (mate.policy_factory(2),)) for i, mate in enumerate(self.pool)]
+        games = [make_env("pp", control="ego", seed=seed, n_teammates=1, teammate_groups=groups,
+                          switch_interval=(5, 8)) for seed in range(41, 45)]
+        for game in games:
+            self.addCleanup(game.close)
+            game.set_test_mode(True)
+            game.reset()
+        world = TorchPPEgo(len(games), "cpu", teammates=self.pool)
+        ids = torch.tensor([int(g.group_name) for g in games])
+        world.load_snapshot(teammate_ids=ids,
+                            positions=np.array([[a.position for a in (*g.world.players, g.world.prey,
+                                                                      *g.world.obstacles)] for g in games]),
+                            velocity=np.array([[a.velocity for a in (*g.world.players, g.world.prey)] for g in games]))
+        rng = np.random.default_rng(717)
+        changes = 0
+        for t in range(world.episode_limit):
+            expected = torch.tensor([int(g.group_name) for g in games])
+            changed = world.apply_teammates(expected)
+            torch.testing.assert_close(changed, expected != ids)
+            changes += changed.sum().item()
+            ids = expected
+            np.testing.assert_allclose(world.state(), [g.get_state() for g in games], atol=2e-6)
+            ego_actions = rng.integers(world.n_actions, size=(len(games), 2))
+            results = [g.step(a) for g, a in zip(games, ego_actions)]
+            reward, _, timeout = world.step(torch.from_numpy(ego_actions))
+            np.testing.assert_array_equal(world.last_joint_actions, [g.last_joint_actions for g in games])
+            np.testing.assert_array_equal(reward, [r for r, _, _ in results])
+            self.assertTrue((timeout == (t + 1 == world.episode_limit)).all())
+        self.assertGreater(changes, 0)
+        self.assertGreater(sum(len(g.events)-1 for g in games), changes)
+        memory, last = world._hidden.clone(), world._previous.clone()
+        self.assertFalse(world.apply_teammates(1 - ids).any())
+        torch.testing.assert_close(world.teammate_ids, ids)
+        torch.testing.assert_close(world._hidden, memory)
+        torch.testing.assert_close(world._previous, last)
