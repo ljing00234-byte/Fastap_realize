@@ -17,10 +17,13 @@ class ParticleContacts:
         signs = torch.where(first < second, 1, -1)
         self.coincident_normal = torch.stack((signs, torch.zeros_like(signs)), dim=-1)
 
-    def forces(self, positions):
+    def forces(self, positions, present=None):
         delta = positions[:, :self.movers, None, :] - positions[:, None, :, :]
         distance = torch.linalg.vector_norm(delta, dim=-1)
         normal = delta / distance.masked_fill(distance == 0, 1).unsqueeze(-1)
         normal = torch.where((distance == 0).unsqueeze(-1), self.coincident_normal, normal)
         penetration = torch.logaddexp(distance.new_zeros(()), (self.touch_distance - distance) / _CONTACT_MARGIN)
-        return ((_CONTACT_FORCE * _CONTACT_MARGIN * penetration * self.interact).unsqueeze(-1) * normal).sum(2)
+        interact = self.interact
+        if present is not None:
+            interact = interact & present[:, :self.movers, None] & present[:, None, :]
+        return ((_CONTACT_FORCE * _CONTACT_MARGIN * penetration * interact).unsqueeze(-1) * normal).sum(2)

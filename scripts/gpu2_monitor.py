@@ -102,6 +102,7 @@ def pending_allocations(processes):
     reserved = 0
     smoke_script = str(ROOT / "scripts/qmix_lbf_smoke.py").encode()
     pp_switch_script = str(ROOT / "scripts/evaluate_pp_ego_switch.py").encode()
+    cn_switch_script = str(ROOT / "scripts/evaluate_cn_ego_switch.py").encode()
     baseline_script = str(ROOT / "scripts/run_baseline.py").encode()
     cooperation_script = str(ROOT / "scripts/train_lbf_cooperation.py").encode()
     pool_ego_script = str(ROOT / "scripts/train_lbf_pool_ego.py").encode()
@@ -116,7 +117,7 @@ def pending_allocations(processes):
                                              shared_pool_ego_script, lbf_switch_script)):
             flag = b"--expected-peak-mib"
             peak = int(args[args.index(flag) + 1]) if flag in args else BASELINE_PEAK
-        elif smoke_script in args or pp_switch_script in args:
+        elif smoke_script in args or pp_switch_script in args or cn_switch_script in args:
             peak = EXPECTED_PEAK
         else:
             continue

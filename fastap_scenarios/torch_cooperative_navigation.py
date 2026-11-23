@@ -1,4 +1,4 @@
-"""Batched cooperative navigation with two ego slots, one teammate and four landmarks."""
+"""Batched cooperative navigation with two ego slots and four landmarks."""
 
 import numpy as np
 import torch
@@ -19,22 +19,25 @@ class TorchCooperativeNavigation:
     state_shape = CooperativeNavigationWorld.state_shape
     episode_limit = 25
 
-    def __init__(self, batch_size, device, seed=0):
-        if batch_size < 1:
-            raise ValueError("CN requires at least one board")
+    def __init__(self, batch_size, device, seed=0, *, n_agents=3):
+        if batch_size < 1 or n_agents not in (3, 4):
+            raise ValueError("CN requires at least one board and three or four agent slots")
+        self.n_agents = n_agents
         self.batch_size = batch_size
         self.device = torch.device(device)
         self.rng = torch.Generator(device=self.device).manual_seed(seed)
         self.moves = torch.as_tensor(MOVES, device=self.device)
-        self.contacts = ParticleContacts(self.moves.new_full((3,), AGENT_RADIUS), movers=3)
-        self.others = torch.tensor([[1, 2], [0, 2], [0, 1]], device=self.device)
-        self.pair_i, self.pair_j = torch.triu_indices(3, 3, offset=1, device=self.device)
-        self.available = torch.ones(batch_size, 3, self.n_actions, dtype=torch.bool, device=self.device)
+        self.contacts = ParticleContacts(self.moves.new_full((n_agents,), AGENT_RADIUS), movers=n_agents)
+        self.others = torch.tensor([[j for j in range(n_agents) if j != i] for i in range(n_agents)],
+                                   device=self.device)
+        self.pair_i, self.pair_j = torch.triu_indices(n_agents, n_agents, offset=1, device=self.device)
+        self.available = torch.ones(batch_size, n_agents, self.n_actions, dtype=torch.bool, device=self.device)
+        self.present = None
 
     def reset(self, layout="random"):
         if layout != "random":
             raise ValueError("CN uses random agent and landmark positions")
-        coords = torch.rand((self.batch_size, 7, 2), device=self.device, dtype=torch.float64,
+        coords = torch.rand((self.batch_size, 4 + self.n_agents, 2), device=self.device, dtype=torch.float64,
                             generator=self.rng) * 2 - 1
         self.load_snapshot(coords[:, 4:], torch.zeros_like(coords[:, 4:]), coords[:, :4])
 
@@ -44,9 +47,10 @@ class TorchCooperativeNavigation:
             if tensor.shape != (self.batch_size, slots, 2):
                 raise ValueError(f"Expected {slots} two-dimensional vectors per board")
             return tensor.clone()
-        self.positions = read(positions, 3)
-        self.velocity = read(velocity, 3)
+        self.positions = read(positions, self.n_agents)
+        self.velocity = read(velocity, self.n_agents)
         self.landmarks = read(landmarks, 4)
+        self.present = None
         self.steps = 0
         self.terminated = torch.zeros(self.batch_size, dtype=torch.bool, device=self.device)
         self.truncated = torch.zeros_like(self.terminated)
@@ -54,12 +58,18 @@ class TorchCooperativeNavigation:
     def observations(self):
         relative = self.landmarks[:, None] - self.positions[:, :, None]
         peers = self.positions[:, self.others] - self.positions[:, :, None]
-        peers = F.pad(peers, (0, 1), value=1).flatten(2)
-        return torch.cat((self.velocity, self.positions, relative.flatten(2), F.pad(peers, (0, 3))), dim=-1).float()
+        peers = F.pad(peers, (0, 1), value=1)
+        if self.present is not None:
+            peers = peers * self.present[:, self.others, None]
+        peer_slots = F.pad(peers.flatten(2), (0, 3 * (4 - self.n_agents)))
+        return torch.cat((self.velocity, self.positions, relative.flatten(2), peer_slots), dim=-1).float()
 
     def state(self):
         movers = F.pad(torch.cat((self.positions, self.velocity), dim=-1), (0, 1), value=1)
-        return torch.cat((F.pad(movers.flatten(1), (0, 5)), self.landmarks.flatten(1)), dim=-1).float()
+        if self.present is not None:
+            movers = movers * self.present.unsqueeze(-1)
+        slots = F.pad(movers.flatten(1), (0, 5 * (4 - self.n_agents)))
+        return torch.cat((slots, self.landmarks.flatten(1)), dim=-1).float()
 
     def avail_actions(self):
         return self.available
@@ -69,14 +79,20 @@ class TorchCooperativeNavigation:
             raise RuntimeError("Reset CN before stepping a finished episode")
         if actions.shape != (self.batch_size, self.n_agents) or actions.dtype != torch.long:
             raise ValueError("Provide one integer action per active agent and board")
-        moves = self.moves.index_select(0, actions.flatten()).reshape(self.batch_size, 3, 2)
-        force = AGENT_ACCELERATION * moves + self.contacts.forces(self.positions)
+        moves = self.moves.index_select(0, actions.flatten()).reshape(self.batch_size, self.n_agents, 2)
+        if self.present is not None:
+            moves = moves * self.present.unsqueeze(-1)
+        force = AGENT_ACCELERATION * moves + self.contacts.forces(self.positions, self.present)
         self.velocity = (1 - _DAMPING) * self.velocity + _DT * force
         self.positions = self.positions + _DT * self.velocity
         distances = torch.linalg.vector_norm(self.landmarks[:, :, None] - self.positions[:, None], dim=-1)
-        self.distance_sum = distances.amin(-1).sum(-1)
         pairs = self.positions[:, self.pair_i] - self.positions[:, self.pair_j]
-        self.collisions = (torch.linalg.vector_norm(pairs, dim=-1) < 2 * AGENT_RADIUS).sum(-1)
+        collisions = torch.linalg.vector_norm(pairs, dim=-1) < 2 * AGENT_RADIUS
+        if self.present is not None:
+            distances = distances.masked_fill(~self.present[:, None, :], torch.inf)
+            collisions = collisions & self.present[:, self.pair_i] & self.present[:, self.pair_j]
+        self.distance_sum = distances.amin(-1).sum(-1)
+        self.collisions = collisions.sum(-1)
         self.steps += 1
         if self.steps == self.episode_limit:
             self.truncated = torch.ones_like(self.truncated)
