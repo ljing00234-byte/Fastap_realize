@@ -105,12 +105,14 @@ def pending_allocations(processes):
     cooperation_script = str(ROOT / "scripts/train_lbf_cooperation.py").encode()
     pool_ego_script = str(ROOT / "scripts/train_lbf_pool_ego.py").encode()
     shared_pool_ego_script = str(ROOT / "scripts/train_pool_ego.py").encode()
+    lbf_switch_script = str(ROOT / "scripts/evaluate_lbf_ego_switch.py").encode()
     for pid, used in processes.items():
         try:
             args = (Path("/proc") / str(pid) / "cmdline").read_bytes().split(b"\0")
         except FileNotFoundError:
             continue
-        if any(script in args for script in (baseline_script, cooperation_script, pool_ego_script, shared_pool_ego_script)):
+        if any(script in args for script in (baseline_script, cooperation_script, pool_ego_script,
+                                             shared_pool_ego_script, lbf_switch_script)):
             flag = b"--expected-peak-mib"
             peak = int(args[args.index(flag) + 1]) if flag in args else BASELINE_PEAK
         elif smoke_script in args:
