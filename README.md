@@ -62,6 +62,19 @@ policy = FastapPolicy.load(latest, device="cpu")
 
 **训练与评估口径。** 默认训练 200 万个 ego 环境步，折扣为 0.99，Adam 学习率为 0.0005。训练采用算法 2 的局内固定组。优先为新簇积累回放，预热完成后均匀抽簇再在簇内抽组。每轮从每个活跃簇采 32 个回合，先逐簇计算 TD 损失，各更新一次局部 Q 网络和混合网络。随后固定刚更新的价值网络，用所有簇的 TD 与辅助目标训练全局、局部编码器和辅助网络。每完成 200 轮同步目标网络。评估在配对的新开局上分别测试固定队友和局内重抽队友。后者每次从 5 到 8 的整数间均匀抽取等待步数，到期重抽。两种设置分别报告原始团队回报，衡量同一候选池的局内适应能力。[补充材料算法 2–3](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=7)
 
+### LBF 正式队友的 CRP 分簇与图 6
+
+冻结正式池的八个单队友，按 T1 至 T8 的顺序用真实交互轨迹做 CRP 分簇。每个队友加入时按当时的最大后验确定簇号。画图时用最后一次更新后的同一个编码器重新计算每条轨迹的 16 维向量，以便在同一个三维 PCA 坐标系下比较各簇。种子默认取 7。复跑时给第一条 Python 命令指定一个新目录，两条命令使用相同的目录。[论文 §5.3 与图 6](https://proceedings.mlr.press/v216/zhang23a/zhang23a.pdf#page=8)
+
+```bash
+source scripts/epymarl-env.sh
+run_dir=outputs/fastap_lbf_formal_pool_01/crp_seed7
+envs/epymarl/bin/python -B scripts/cluster_lbf_teammates.py "$run_dir"
+envs/lbf-plot/bin/python -B scripts/plot_lbf_crp.py "$run_dir" --crossplay outputs/fastap_lbf_formal_pool_01/crossplay.json
+```
+
+`clustering.json` 记录成员、入簇顺序和各候选的后验打分依据，`embeddings.json` 保存每条探测轨迹的行为向量，`crp.pt` 保存探测数据和各次入簇时的模型。`figure6.png` 并排展示成员交叉评估、轨迹嵌入和簇间交叉评估。热力图复用同一正式池的有向实测回报，行指定原配的两个 ego，列指定换入的冻结队友。每个成员组合评估相同的 256 张地图，簇对的分数取块内所有组合的等权均值。`cluster_crossplay.json` 还单列排除原配后的簇内互换成绩。该汇总口径由本复现明确指定，论文未公开簇级评估的具体计算细节。
+
 ## QMIX 基线模块
 
 在 LBF、PP 和 CN 中，先联合训练三名智能体，把第 3 名冻结为队友。用不同种子生成 8 名队友后，每局从池中抽取搭档，训练两个 ego。模块 README 提供这三个步骤的命令，以及智能体网络、QMIX 更新和队友生成的源码入口。

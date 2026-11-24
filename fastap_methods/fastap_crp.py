@@ -79,6 +79,7 @@ class TeammateCRP:
         self.centers = []
         self._probes = []
         self.last_model_loss = None
+        self.last_assignment_log_scores = None
 
     def _unpack(self, batch):
         valid = batch['filled'].bool().cpu()
@@ -135,6 +136,7 @@ class TeammateCRP:
                 scores[i] += evidence.double().sum()
         if not scores.isfinite().all():
             raise FloatingPointError("Nonfinite predictive likelihood in CRP")
+        self.last_assignment_log_scores = scores.detach()
         label = scores.argmax().item()
         return label, candidates[label].detach()
 
@@ -160,7 +162,8 @@ class TeammateCRP:
         return dict(model=self.model.state_dict(), optimizer=self.optimizer.state_dict(),
                     assignments=dict(self.assignments), counts=list(self.counts), centers=list(self.centers),
                     probes=list(self._probes), alpha=self.alpha, minibatch_size=self.minibatch_size,
-                    last_model_loss=self.last_model_loss)
+                    last_model_loss=self.last_model_loss,
+                    last_assignment_log_scores=self.last_assignment_log_scores)
 
     def load_state_dict(self, saved):
         self.model.load_state_dict(saved['model'])
@@ -170,3 +173,4 @@ class TeammateCRP:
         self.centers = [center.to(self.device) for center in saved['centers']]
         self._probes = [tuple(field.cpu() for field in probe) for probe in saved['probes']]
         self.last_model_loss = saved['last_model_loss']
+        self.last_assignment_log_scores = saved.get('last_assignment_log_scores')
