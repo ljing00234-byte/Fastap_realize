@@ -1,3 +1,7 @@
+import hashlib
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 import numpy as np
@@ -7,6 +11,58 @@ from scripts.plot_lbf_crp import aggregate_crossplay, project_embeddings
 
 
 class LbfCrpAnalysisTests(unittest.TestCase):
+    def test_standalone_crp_keeps_failed_probes_and_replays_the_same_start_in_both_modes(self):
+        from fastap_agents import AgentSpec
+        from fastap_methods.lbf_crp_analysis import ROOT, run_crp
+        from fastap_scenarios.fastap_rollout import load_fastap_groups
+
+        spec = AgentSpec("lbf", "team", 3, 21, 6, 8, True, True, True)
+        temp_root = ROOT / '.tmp/epymarl'
+        temp_root.mkdir(exist_ok=True, parents=True)
+        with TemporaryDirectory(dir=temp_root) as temp:
+            base = Path(temp)
+            with torch.random.fork_rng(devices=[]):
+                model = spec.build_network()
+            weights = {key: torch.zeros_like(value) for key, value in model.state_dict().items()}
+            members = []
+            for i in range(1, 9):
+                checkpoint = base / f'T{i}'
+                checkpoint.mkdir()
+                spec.save(checkpoint)
+                torch.save(weights, checkpoint / 'agent.th')
+                digest = hashlib.sha256((checkpoint / 'agent.th').read_bytes()).hexdigest()
+                members.append(dict(id=checkpoint.name, path=checkpoint.name, sha256=digest))
+            pool = base / 'pool.json'
+            pool.write_text(json.dumps(dict(format='lbf-teammate-pool-v1', scene='lbf', role=2,
+                                            target_size=8, members=members)))
+            groups = load_fastap_groups('lbf', pool)
+            for single, mixed in zip(groups[::2], groups[1::2]):
+                actors = [factory() for factory in (*single.probe_egos, *single.policies)]
+                self.assertEqual([actor.role.argmax().item() for actor in actors], [0, 1, 2])
+                self.assertTrue(all(actor.model is actors[0].model for actor in actors))
+                self.assertFalse(mixed.probe_egos)
+
+            config = dict(scenes={'lbf': {'alpha': .5, 'groups_per_round': 4}},
+                          probe_episodes=1, crp_model_steps=1, lr=.0005)
+            own_dir, random_dir = base / 'own', base / 'random'
+            summary = run_crp(pool, own_dir, method_config=config)
+            total = summary['probe_outcomes']['total']
+            self.assertEqual(summary['protocol']['probe_ego'], 'own_original')
+            self.assertEqual((total['episodes'], total['any_food'], total['all_food']), (8, 0, 0))
+            for member in members:
+                self.assertEqual(summary['probe_outcomes']['per_group'][member['id']]['episode_returns'], [0.])
+            legacy = run_crp(pool, random_dir, method_config=config, probe_ego='random_legal')
+            self.assertEqual(legacy['protocol']['probe_ego'], 'random_legal')
+            own, random = [torch.load(directory / 'crp.pt', weights_only=True, map_location='cpu')['crp']['probes']
+                           for directory in (own_dir, random_dir)]
+            self.assertEqual(len(own), len(random))
+            self.assertEqual(len(own), 8)
+            for own_probe, random_probe in zip(own, random):
+                states, random_states = own_probe[0], random_probe[0]
+                self.assertTrue(torch.equal(states[0], random_states[0]))
+                self.assertTrue(torch.equal(states, states[0].expand_as(states)))
+                self.assertFalse(torch.equal(random_states, random_states[0].expand_as(random_states)))
+
     def test_joint_observations_use_real_slots_and_preserve_padding(self):
         from contextlib import closing
         from fastap_scenarios.foraging import ForagingWorld

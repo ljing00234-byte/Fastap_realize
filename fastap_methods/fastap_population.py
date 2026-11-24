@@ -78,7 +78,9 @@ class OnlineTeammates:
             frozen = load_frozen_agent(Path(temp) / checkpoint, device='cpu')
             if (frozen.spec.scene_key, frozen.spec.control, frozen.spec.n_agents) != (self.scene, 'team', 2 + count):
                 raise ValueError("Generated actor metadata does not match the training roster")
-            group = TeammateGroup(group_name, tuple(frozen.policy_factory(slot) for slot in range(2, 2 + count)))
+            teammate_policies = tuple(frozen.policy_factory(slot) for slot in range(2, 2 + count))
+            probe_egos = tuple(frozen.policy_factory(slot) for slot in (0, 1)) if self.scene == 'lbf' else ()
+            group = TeammateGroup(group_name, teammate_policies, probe_egos=probe_egos)
             Path(temp).rename(directory)
         self.records.append(dict(group=group_name, n_teammates=count, seed=group_seed,
                                  training_steps=result['training_steps'], optimizer_updates=result['optimizer_updates'],

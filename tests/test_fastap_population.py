@@ -21,6 +21,10 @@ class OnlineTeammateTests(unittest.TestCase):
             solo = source(0)
             pair = source(1)
             self.assertEqual([len(group.policies) for group in (solo, pair)], [1, 2])
+            for group in (solo, pair):
+                original = [factory() for factory in group.probe_egos]
+                self.assertEqual([policy.role.argmax().item() for policy in original], [0, 1])
+                self.assertTrue(all(policy.model is group.policies[0]().model for policy in original))
             first, second = [factory() for factory in pair.policies]
             self.assertEqual([first.role.argmax().item(), second.role.argmax().item()], [2, 3])
             self.assertIs(first.model, second.model)

@@ -20,7 +20,7 @@ SMOKE_SETTINGS = dict(t_max=200, batch_size=1, buffer_size=32, test_nepisode=2, 
 
 
 @torch.no_grad()
-def _episode(env, group, policy, rng, *, epsilon=0., switch_interval=None):
+def _episode(env, group, policy, rng, *, epsilon=0., switch_interval=None, probe_egos=()):
     """Store CPU tensors, with one extra observation/state for the final TD target."""
     obs, state, available = env.reset(group, switch_interval=switch_interval)
     t, n, o, a, p = env.episode_limit, env.n_agents, env.obs_shape, env.n_actions, env.max_teammates
@@ -38,7 +38,9 @@ def _episode(env, group, policy, rng, *, epsilon=0., switch_interval=None):
         previous = torch.zeros(1, n, a, device=device)
     for step in range(t):
         data['obs'][step], data['state'][step], data['available'][step] = obs, state, available
-        if policy is None:
+        if probe_egos:
+            actions = np.array([act(local, mask, rng) for act, local, mask in zip(probe_egos, obs, available)])
+        elif policy is None:
             actions = np.array([rng.choice(np.flatnonzero(mask)) for mask in available])
         else:
             local = torch.as_tensor(data['obs'][step], device=device).unsqueeze(0)
@@ -63,6 +65,18 @@ def _episode(env, group, policy, rng, *, epsilon=0., switch_interval=None):
             data['teammate_mask'] = data['teammate_actions'] >= 0
             return {key: torch.from_numpy(value) for key, value in data.items()}
     raise RuntimeError("Scenario exceeded its episode limit")
+
+
+def collect_probe_episodes(env, group_index, rng, count, *, use_original_egos=True):
+    """Roll out a frozen group with fresh recurrent partners in each stationary episode."""
+    if type(count) is not int or count < 1:
+        raise ValueError("Probe count must be a positive integer")
+    factories = env.groups[group_index].probe_egos if use_original_egos else ()
+    episodes = []
+    for _ in range(count):
+        egos = tuple(factory() for factory in factories)
+        episodes.append(_episode(env, group_index, None, rng, probe_egos=egos))
+    return episodes
 
 
 def _batch(episodes):
@@ -158,14 +172,19 @@ def _fit(scene, env, probe_env, agent, cfg, seed, run_dir, log, world_options, g
                     group = group_factory(idx)
                     env.add_group(group)
                     probe_env.add_group(group)
-                name = env.groups[idx].name
-                probes = [_episode(probe_env, idx, None, probe_rng) for _ in range(cfg['probe_episodes'])]
+                group = env.groups[idx]
+                name = group.name
+                probes = collect_probe_episodes(probe_env, idx, probe_rng, cfg['probe_episodes'])
                 probe_steps += sum(int(ep['filled'].sum()) for ep in probes)
                 cluster = crp.add_group(name, _batch(probes), model_steps=cfg['crp_model_steps'])
                 members.setdefault(cluster, []).append(idx)
                 replay.admit(cluster)
+                returns = [ep['reward'].sum().item() for ep in probes]
+                food_counts = {'probe_episodes_with_food': sum(r > 0 for r in returns)} if scene == 'lbf' else {}
                 record(event="admit", group=name, cluster=cluster, probe_steps=probe_steps,
-                       model_loss=crp.last_model_loss)
+                       probe_episodes=len(probes), probe_return_mean=float(np.mean(returns)),
+                       probe_ego_policy='original_partners' if group.probe_egos else 'random_legal',
+                       model_loss=crp.last_model_loss, **food_counts)
                 next_group = idx + 1
             next_round = step + cfg['group_interval_steps']
         # Warm each new cluster's replay, then sample clusters and their members uniformly.

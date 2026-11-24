@@ -15,6 +15,8 @@ def main():
     parser.add_argument("run_dir", type=Path, help="new project directory for assignments, probes and embeddings")
     parser.add_argument("--teammate-pool", type=Path, default=FORMAL_POOL, help="eight-member LBF pool.json")
     parser.add_argument("--seed", type=int, default=7, help="behavior-model seed (probe seed is one higher)")
+    parser.add_argument("--probe-ego", choices=("own_original", "random_legal"), default="own_original",
+                        help="use each teammate's original QMIX partners (default) or uniformly random legal actions")
     args = parser.parse_args()
     if args.seed < 0:
         parser.error("The seed must be nonnegative")
@@ -27,7 +29,7 @@ def main():
     from fastap_methods.lbf_crp_analysis import run_crp
 
     torch.set_num_threads(1)
-    result = run_crp(args.teammate_pool, args.run_dir, seed=args.seed)
+    result = run_crp(args.teammate_pool, args.run_dir, seed=args.seed, probe_ego=args.probe_ego)
     print(json.dumps(result["clusters"], indent=2))
 
 

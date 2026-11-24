@@ -58,24 +58,26 @@ policy = FastapPolicy.load(latest, device="cpu")
 | 互信息 / 重建权重 | 0.001 / 0.1 | 0.001 / 0.2 | 0.001 / 0.2 |
 | 局部 / 全局上下文维数 | 4 / 6 | 16 / 20 | 4 / 6 |
 
-**引入频率与探测。** 默认开局引入首批，之后每 5 万个 ego 交互步引入下一批，至候选组用尽或 ego 训练结束。冻结池模式在 LBF、CN 中将池中相邻队友轮转配成双人组。每组用随机合法 ego 动作探测 8 局，分簇模型在历次探测数据上更新 64 次再为新组分簇。引入间隔、探测规模和离散动作进入高斯 CRP 解码器时的 one-hot 表示是本实现的取值。[补充材料算法 1](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=6) · [论文超参数表](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=8)
+**引入频率与探测。** 默认开局引入首批，之后每 5 万个 ego 交互步引入下一批，至候选组用尽或 ego 训练结束。冻结池模式在 LBF、CN 中将池中相邻队友轮转配成双人组。每组采集 8 个完整探测回合，再用历组轨迹更新行为模型 64 次。LBF 的冻结单队友和在线联合训练的队友组使用各自训练时的两个搭档采样。两名搭档按原角色编号执行冻结策略，每局分别重置记忆。由不同队伍拼成的双队友组没有共同原配，使用随机合法动作探测。PP、CN 和演示队友组也使用随机合法动作。搭档选择、引入间隔、探测规模和离散动作的 one-hot 表示均为本复现的取值。[补充材料算法 1](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=6) · [论文超参数表](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=8)
 
 **训练与评估口径。** 默认训练 200 万个 ego 环境步，折扣为 0.99，Adam 学习率为 0.0005。训练采用算法 2 的局内固定组。优先为新簇积累回放，预热完成后均匀抽簇再在簇内抽组。每轮从每个活跃簇采 32 个回合，先逐簇计算 TD 损失，各更新一次局部 Q 网络和混合网络。随后固定刚更新的价值网络，用所有簇的 TD 与辅助目标训练全局、局部编码器和辅助网络。每完成 200 轮同步目标网络。评估在配对的新开局上分别测试固定队友和局内重抽队友。后者每次从 5 到 8 的整数间均匀抽取等待步数，到期重抽。两种设置分别报告原始团队回报，衡量同一候选池的局内适应能力。[补充材料算法 2–3](https://proceedings.mlr.press/v216/zhang23a/zhang23a-supp.pdf#page=7)
 
 ### LBF 正式队友的 CRP 分簇与图 6
 
-冻结正式池的八个单队友，按 T1 至 T8 的顺序用真实交互轨迹做 CRP 分簇。每个队友加入时按当时的最大后验确定簇号。画图时用最后一次更新后的同一个编码器重新计算每条轨迹的 16 维向量，以便在同一个三维 PCA 坐标系下比较各簇。种子默认取 7。复跑时给第一条 Python 命令指定一个新目录，两条命令使用相同的目录。[论文 §5.3 与图 6](https://proceedings.mlr.press/v216/zhang23a/zhang23a.pdf#page=8)
+冻结正式池的八个单队友，按 T1 至 T8 的顺序做 CRP 分簇。默认使用各队友同一检查点的角色 0、1 作为采样搭档。所有开局都进入训练，包括没有采到食物的回合。每个队友加入时按当时的最大后验确定簇号。画图时用最后一次更新后的同一个编码器重新计算每条轨迹的 16 维向量，以便在同一个三维 PCA 坐标系下比较各簇。种子默认取 7。复跑时给第一条 Python 命令指定一个新目录，两条命令使用相同的目录。[论文 §5.3 与图 6](https://proceedings.mlr.press/v216/zhang23a/zhang23a.pdf#page=8)
 
 ```bash
 source scripts/epymarl-env.sh
-run_dir=outputs/fastap_lbf_formal_pool_01/crp_seed7
+run_dir=outputs/fastap_lbf_formal_pool_01/crp_own_original_seed7
 envs/epymarl/bin/python -B scripts/cluster_lbf_teammates.py "$run_dir"
 envs/lbf-plot/bin/python -B scripts/plot_lbf_crp.py "$run_dir" --crossplay outputs/fastap_lbf_formal_pool_01/crossplay.json
 ```
 
-`clustering.json` 记录成员、入簇顺序和各候选的后验打分依据，`embeddings.json` 保存每条探测轨迹的行为向量，`crp.pt` 保存探测数据和各次入簇时的模型。`figure6.png` 并排展示成员交叉评估、轨迹嵌入和簇间交叉评估。热力图复用同一正式池的有向实测回报，行指定原配的两个 ego，列指定换入的冻结队友。每个成员组合评估相同的 256 张地图，簇对的分数取块内所有组合的等权均值。`cluster_crossplay.json` 还单列排除原配后的簇内互换成绩。该汇总口径由本复现明确指定，论文未公开簇级评估的具体计算细节。
+种子 7 的 64 个开局用随机搭档采样时，采食局为 0。用原配搭档采样时，62 局采到食物，其中 52 局采完三份，平均回报为 0.9115。两局零回报也计入行为模型训练。每组都有 7 或 8 局采食成功。
 
-要检查式（4）的训练权重和图 6 的分离效果，可以重放正式运行的 64 条探测轨迹。下面的审计固定队友、入簇顺序和地图，分别使用模型种子 7、17、27。每个模型在 32 张未见地图上分别用随机搭档和同一对训练好的 T1 搭档探测，共 512 局。用入簇时的标签计算最终编码器的轮廓系数，并比较换成同簇、跨簇其他队友时的实测回报。轮廓系数是本地诊断指标，论文未报告该数值。
+`clustering.json` 的 `probe_outcomes` 记录各队友的逐局回报、采到食物的局数及采完三份食物的局数。文件还记录成员、入簇顺序和各候选的后验打分依据，`embeddings.json` 保存每条探测轨迹的行为向量，`crp.pt` 保存探测数据和各次入簇时的模型。`figure6.png` 并排展示成员交叉评估、轨迹嵌入和簇间交叉评估。热力图复用同一正式池的有向实测回报，行指定原配的两个 ego，列指定换入的冻结队友。每个成员组合评估相同的 256 张地图，簇对的分数取块内所有组合的等权均值。`cluster_crossplay.json` 还单列排除原配后的簇内互换成绩。该汇总口径由本复现明确指定，论文未公开簇级评估的具体计算细节。
+
+初版随机搭档对照保存在 `crp_seed7`，可以向分簇命令传入新目录和 `--probe-ego random_legal` 复算。以下审计重放初版的 64 条探测轨迹，以检查式（4）的训练权重和图 6 的分离效果。下面的审计固定队友、入簇顺序和地图，分别使用模型种子 7、17、27。每个模型在 32 张未见地图上分别用随机搭档和同一对训练好的 T1 搭档探测，共 512 局。用入簇时的标签计算最终编码器的轮廓系数，并比较换成同簇、跨簇其他队友时的实测回报。轮廓系数是本地诊断指标，论文未报告该数值。
 
 ```bash
 source scripts/epymarl-env.sh
@@ -92,7 +94,7 @@ envs/epymarl/bin/python -B scripts/audit_lbf_crp_selfplay.py "$audit_dir/selfpla
 
 另一个独立对照用每个队友的原配双人采集训练轨迹，同时在原配搭档和公共搭档下评估。公共搭档组控制了其他两个角色的策略。`selfplay.json` 给出两套评估的分离度。[原配探测对照](scripts/audit_lbf_crp_selfplay.py)
 
-要追查正式 CRP 的入簇决定，可以用原模型、原公式和已保存的轨迹重算。以下脚本使用上面的 CPU 环境设置，复跑时将 `check_dir` 设为新目录。
+要追查初版随机搭档下 CRP 的入簇决定，可以用该次保存的模型和轨迹重算。以下脚本使用上面的 CPU 环境设置，复跑时将 `check_dir` 设为新目录。
 
 ```bash
 check_dir=outputs/fastap_lbf_formal_pool_01/crp_diagnostics/crossplay_admission_audit

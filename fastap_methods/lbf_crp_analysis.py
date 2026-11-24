@@ -14,7 +14,7 @@ import yaml
 
 from fastap_scenarios.fastap_rollout import FastapRolloutEnv, load_fastap_groups
 from .fastap_crp import TeammateCRP, _collate
-from .fastap_training import ROOT, _batch, _episode
+from .fastap_training import ROOT, _batch, collect_probe_episodes
 
 
 def _write_json(path, value):
@@ -50,7 +50,13 @@ def _final_embeddings(crp, probes, admissions):
     return dict(encoder="final", dimension=crp.model.width, rows=rows)
 
 
-def run_crp(pool_path, output_dir, *, seed=7, method_config=None):
+def _food_outcomes(returns):
+    scores = np.asarray(returns, dtype=np.float64)
+    return dict(episodes=len(returns), any_food=int((scores > 0).sum()),
+                all_food=int(np.isclose(scores, 1.).sum()), mean_return=float(scores.mean()))
+
+
+def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own_original'):
     """Run standalone, sequential MAP clustering on CPU and publish its audit artifacts."""
     pool_path = (ROOT / pool_path).resolve()
     output_dir = (ROOT / output_dir).resolve()
@@ -58,6 +64,8 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None):
         raise ValueError("Keep the pool and CRP artifacts inside the project")
     if output_dir.exists():
         raise FileExistsError(output_dir)
+    if probe_ego not in ('own_original', 'random_legal'):
+        raise ValueError("probe_ego must be own_original or random_legal")
     if method_config is None:
         method_config = yaml.safe_load((ROOT / 'configs/methods/fastap.yaml').read_text())
     cfg = {**method_config, **method_config['scenes']['lbf']}
@@ -74,16 +82,25 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None):
     order = [g.name for g in groups]
     if manifest.get('target_size') != 8 or order != [f'T{i}' for i in range(1, 9)]:
         raise ValueError("Expected the complete LBF pool in T1–T8 publication order")
+    use_original_egos = probe_ego == 'own_original'
+    if use_original_egos:
+        for group in groups:
+            if not group.probe_egos or len(group.probe_egos) != 2:
+                raise ValueError(f"Missing original QMIX partners for {group.name}; expected roles 0 and 1")
 
     probe_seed = seed + 1
     rng = np.random.default_rng(probe_seed)
     admissions, snapshots, assignments, clusters = [], [], {}, {}
+    probe_outcomes = {}
     with closing(FastapRolloutEnv('lbf', groups, seed=probe_seed)) as env, torch.random.fork_rng(devices=[]):
         torch.random.default_generator.manual_seed(seed)
         model_args = dict(state_dim=env.state_shape, n_actions=env.n_actions, n_teammates=env.max_teammates)
         crp = TeammateCRP(**model_args, alpha=cfg['alpha'], lr=cfg['lr'], device='cpu')
         for i, group in enumerate(groups):
-            episodes = [_episode(env, i, None, rng) for _ in range(cfg['probe_episodes'])]
+            episodes = collect_probe_episodes(env, i, rng, cfg['probe_episodes'],
+                                              use_original_egos=use_original_egos)
+            returns = [ep['reward'][ep['filled']].sum().item() for ep in episodes]
+            probe_outcomes[group.name] = dict(episode_returns=returns, **_food_outcomes(returns))
             counts = list(crp.counts)
             centers = list(crp.centers)  # add_group replaces a center after each MAP decision.
             label = crp.add_group(group.name, _batch(episodes), model_steps=cfg['crp_model_steps'])
@@ -107,15 +124,19 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None):
                         order=order, groups_per_round=cfg['groups_per_round'], alpha=crp.alpha,
                         probe_episodes=cfg['probe_episodes'], crp_model_steps=cfg['crp_model_steps'],
                         lr=cfg['lr'], minibatch_size=crp.minibatch_size, model_args=model_args,
-                        episode_limit=env.episode_limit, ego_policy="uniform legal actions",
+                        episode_limit=env.episode_limit, probe_ego=probe_ego,
+                        ego_policy="original greedy QMIX partners" if use_original_egos else "uniform legal actions",
+                        ego_policy_source=("roles 0 and 1 from the same verified frozen team checkpoint as role 2"
+                                           if use_original_egos else "sampled uniformly from each ego's legal actions"),
                         teammate_role=manifest['role'], active_teammates=1,
                         device='cpu', torch_threads=torch.get_num_threads(),
                         torch_version=str(torch.__version__), numpy_version=np.__version__)
+    all_returns = [value for item in probe_outcomes.values() for value in item['episode_returns']]
     summary = dict(pool_manifest=str(pool_path.relative_to(ROOT)),
                    pool_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
                    member_sha256={m['id']: m['sha256'] for m in manifest['members']},
                    protocol=protocol, assignments=assignments, clusters=clusters,
-                   admissions=admissions)
+                   admissions=admissions, probe_outcomes=dict(per_group=probe_outcomes, total=_food_outcomes(all_returns)))
     output_dir.parent.mkdir(exist_ok=True, parents=True)
     with TemporaryDirectory(dir=output_dir.parent, prefix=f".{output_dir.name}-") as staging_dir:
         staging = Path(staging_dir)

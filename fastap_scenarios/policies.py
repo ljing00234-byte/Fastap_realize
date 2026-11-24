@@ -15,12 +15,18 @@ Policy = Callable[[np.ndarray, np.ndarray, np.random.Generator], int]
 class TeammateGroup:
     name: str
     policies: Tuple[Callable[[], Policy], ...]
+    # Original role-0/1 partners, when the group has a jointly trained LBF roster.
+    probe_egos: Tuple[Callable[[], Policy], ...] = ()
 
     def __post_init__(self):
         if not self.name or not self.policies:
             raise ValueError("A teammate group needs a name and at least one policy factory")
         if not all(callable(factory) for factory in self.policies):
             raise TypeError("Teammate policies must be provided as no-argument factories")
+        if self.probe_egos and len(self.probe_egos) != 2:
+            raise ValueError("Paired probes need both original ego policies")
+        if not all(callable(factory) for factory in self.probe_egos):
+            raise TypeError("Probe ego policies must be provided as no-argument factories")
 
 
 def random_legal(obs, avail, rng):

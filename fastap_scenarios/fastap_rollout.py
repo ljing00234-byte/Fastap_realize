@@ -45,20 +45,21 @@ def load_fastap_groups(scene, manifest_path):
 
     members = verified_pool_members(manifest_path, scene)
     scenario = SCENARIOS[scene]
-    policies = []
+    singles = []
     for name, path in members:
         agent = load_frozen_agent(path, device="cpu")
         spec = agent.spec
         if (spec.scene_key, spec.control, spec.n_agents, spec.obs_shape, spec.n_actions) != (
                 scene, "team", 3, scenario.world.obs_shape, scenario.world.n_actions):
             raise ValueError(f"Incompatible solo teammate checkpoint in {path}")
-        policies.append((name, agent.policy_factory(2)))
+        probe_egos = tuple(agent.policy_factory(slot) for slot in (0, 1)) if scene == "lbf" else ()
+        singles.append(TeammateGroup(name, (agent.policy_factory(2),), probe_egos=probe_egos))
     groups = []
-    for i, (name, factory) in enumerate(policies):
-        groups.append(TeammateGroup(name, (factory,)))
-        if 2 in scenario.teammate_counts and len(policies) > 1:
-            other, other_factory = policies[(i + 1) % len(policies)]
-            groups.append(TeammateGroup(f"{name}+{other}", (factory, other_factory)))
+    for i, single in enumerate(singles):
+        groups.append(single)
+        if 2 in scenario.teammate_counts and len(singles) > 1:
+            other = singles[(i + 1) % len(singles)]
+            groups.append(TeammateGroup(f"{single.name}+{other.name}", single.policies + other.policies))
     if len({group.name for group in groups}) != len(groups):
         raise ValueError("Member IDs produce ambiguous group names")
     return groups
