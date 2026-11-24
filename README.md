@@ -142,6 +142,29 @@ envs/lbf-plot/bin/python -B scripts/plot_lbf_crp.py "$experiment/categorical/see
 
 跨地图主试验让所有队友与 T1 的两名搭档行动。地图 A 提供一局队友行为，地图 B 提供待预测的动作。对同一批 B 局，比较正确表示、其余七名队友的表示和独立训练的仅状态模型。入簇稳定性使用同一批 B 局，每个八局组合替换其中一局，分别用历史中心和当前编码器重算的中心评分。下游评估在独立校准地图上从五个冻结的 ego 策略中选择搭档，再在共同的测试地图上测采食回报。下游同时报告不分簇、打乱标签和所有相同簇大小分区的对照。
 
+### 用已知规则盲测 LBF 分簇
+
+盲测队友包含三种公开目标规则的本地实现，每种规则各有三个使用独立随机数的匿名副本。角色 0 和 1 固定为正式 T1 的原配搭档。当前 LBF 所有食物都要三人共同采集，因此只考虑自己能采食物的规则会一直探索。其余两种分别是随机走动且相邻时装载，以及朝最靠近可见队伍中心的食物移动并装载。[LBF 规则定义](https://github.com/HRI-EU/lb-foraging#available-agent-heuristics)
+
+在新目录运行以下步骤。CRP 拟合只读取匿名训练轨迹，自动决定簇数。每名队友使用相同的 8 张训练地图。另有 32 张地图提供队友表示，32 张独立查询地图用于跨局预测。查询地图分成四组，每组八张，用冻结的编码器和解码器从空簇开始重新分配。脚本也会在这批查询地图上测试此前在正式 T1–T8 上训练的离散解码器。
+
+```bash
+source scripts/epymarl-env.sh
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=""
+experiment=outputs/lbf_rule_blind_v1
+python_bin=envs/epymarl/bin/python
+"$python_bin" -B scripts/lbf_rule_probes.py "$experiment"
+for decoder in paper categorical; do
+    "$python_bin" -B scripts/validate_lbf_rule_clusters.py fit "$experiment" --decoder "$decoder"
+done
+"$python_bin" -B scripts/validate_lbf_rule_clusters.py transfer "$experiment"
+"$python_bin" -B scripts/validate_lbf_rule_clusters.py score "$experiment"
+"$python_bin" -B scripts/evaluate_lbf_rule_prediction.py "$experiment"
+"$python_bin" -B scripts/lbf_rule_positive_control.py "$experiment"
+```
+
+`partition_scores.json` 对照隐藏的规则标签计算调整兰德指数（ARI）。`rule_prediction.json` 比较相同身份、同规则另一副本、错配表示和仅状态模型的动作负对数似然。`positive_control.json` 记录两项对照：给定类型数，用装载和靠近食物的频率做层次聚类；给定候选规则，用观测动作的似然识别规则。两项对照使用同一批轨迹。
+
 ## QMIX 基线模块
 
 在 LBF、PP 和 CN 中，先联合训练三名智能体，把第 3 名冻结为队友。用不同种子生成 8 名队友后，每局从池中抽取搭档，训练两个 ego。模块 README 提供这三个步骤的命令，以及智能体网络、QMIX 更新和队友生成的源码入口。
