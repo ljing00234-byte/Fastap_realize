@@ -110,6 +110,38 @@ envs/epymarl/bin/python -B scripts/audit_lbf_crp_order.py "$check_dir/order.json
 
 `training_coverage.json` 按实际抽到的轨迹累计每次更新的式（4）权重，并核对八次入簇时的模型权重。`shared_histories.json` 在 32 张新地图上采集两种搭档下的真实轨迹。在完全相同的历史上，分别查询两名冻结队友会选的动作，检查 T3、T8 入簇时的两个候选簇会得到什么分数。
 
+### LBF 六动作解码器与跨地图验收
+
+分簇入口的 `--decoder categorical` 让每个队友槽位直接预测六个动作。训练时先对一局内实际观测到的动作取平均交叉熵，再对小批量中的局等权平均。入簇时仍把各观测动作的对数概率相加，与 CRP 计数先验合并。默认的 `--decoder paper` 使用原高斯似然和式（4）。完整 Fastap 训练入口可用 `--crp-decoder categorical` 选择同一基线。
+
+下面的命令固定探测种子 8，让六次训练使用完全相同的 64 条原配轨迹。复跑时选择新的实验目录。正式对照使用模型种子 7、17、27，并预先指定种子 7 展示分区和图形。
+
+```bash
+source scripts/epymarl-env.sh
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=""
+pool=outputs/fastap_lbf_formal_pool_01
+experiment="$pool/crp_categorical_v1"
+python_bin=envs/epymarl/bin/python
+for decoder in paper categorical; do
+    for seed in 7 17 27; do
+        "$python_bin" -B scripts/cluster_lbf_teammates.py "$experiment/$decoder/seed$seed" \
+            --decoder "$decoder" --seed "$seed" --probe-seed 8
+    done
+done
+"$python_bin" -B scripts/evaluate_lbf_crp_prediction.py collect "$experiment"
+"$python_bin" -B scripts/evaluate_lbf_crp_prediction.py evaluate "$experiment"
+"$python_bin" -B scripts/audit_lbf_crp_stability.py "$experiment"
+"$python_bin" -B scripts/evaluate_lbf_cluster_ego.py collect "$pool/pool.json" "$experiment/downstream/returns.npz"
+"$python_bin" -B scripts/evaluate_lbf_cluster_ego.py score "$experiment/downstream/returns.npz" \
+    "$experiment/downstream/ego_return_with_partitions.json" "$experiment"/{paper,categorical}/seed*/clustering.json \
+    --prediction-heldout "$experiment/heldout.pt"
+"$python_bin" -B scripts/plot_lbf_crp.py "$experiment/categorical/seed7" --export-query "$experiment/heldout.pt"
+envs/lbf-plot/bin/python -B scripts/plot_lbf_crp.py "$experiment/categorical/seed7" \
+    --crossplay "$pool/crossplay.json" --heldout-embeddings "$experiment/heldout_embeddings_categorical_seed7.json"
+```
+
+跨地图主试验让所有队友与 T1 的两名搭档行动。地图 A 提供一局队友行为，地图 B 提供待预测的动作。对同一批 B 局，比较正确表示、其余七名队友的表示和独立训练的仅状态模型。入簇稳定性使用同一批 B 局，每个八局组合替换其中一局，分别用历史中心和当前编码器重算的中心评分。下游评估在独立校准地图上从五个冻结的 ego 策略中选择搭档，再在共同的测试地图上测采食回报。下游同时报告不分簇、打乱标签和所有相同簇大小分区的对照。
+
 ## QMIX 基线模块
 
 在 LBF、PP 和 CN 中，先联合训练三名智能体，把第 3 名冻结为队友。用不同种子生成 8 名队友后，每局从池中抽取搭档，训练两个 ego。模块 README 提供这三个步骤的命令，以及智能体网络、QMIX 更新和队友生成的源码入口。

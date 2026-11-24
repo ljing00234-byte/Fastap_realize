@@ -153,7 +153,7 @@ def _fit(scene, env, probe_env, agent, cfg, seed, run_dir, log, world_options, g
         'target_interval', 'bootstrap_at_time_limit', 'grad_norm_clip')})
     device = next(agent.parameters()).device
     crp = TeammateCRP(env.state_shape, env.n_actions, env.max_teammates,
-                      alpha=cfg['alpha'], device=device, lr=cfg['lr'])
+                      alpha=cfg['alpha'], device=device, lr=cfg['lr'], decoder=cfg.get('crp_decoder', 'paper'))
     rng = np.random.default_rng(seed)
     probe_rng = np.random.default_rng(seed + 1)
     members = {}

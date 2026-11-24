@@ -116,6 +116,18 @@ def _draw_pca(ax, pca, assignments, cluster_ids):
     return handles
 
 
+def _embedding_figure(plt, path, pca, assignments, cluster_ids, title, note):
+    fig = plt.figure(figsize=(7.2, 6.8))
+    ax = fig.add_axes([.06,.20,.85,.70], projection='3d')
+    handles = _draw_pca(ax, pca, assignments, cluster_ids)
+    fig.suptitle(title, fontsize=15)
+    fig.legend(handles=handles, loc='lower center', bbox_to_anchor=(.5,.075), ncol=4, frameon=False,
+               columnspacing=1.3, handletextpad=.3)
+    fig.text(.5,.04, note, ha='center', va='center', fontsize=9)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
 def render_plots(directory, source, cluster_data, pca, assignments):
     import matplotlib
     matplotlib.use('Agg')
@@ -129,7 +141,7 @@ def render_plots(directory, source, cluster_data, pca, assignments):
     original = [[cell['mean_return'] for cell in row] for row in source['crossplay']]
     member_text = '     '.join(f'{c}  {", ".join(ids)}' for c, ids in cluster_data['members'].items())
     variance = sum(pca['explained_variance_ratio'])
-    note = f'每点为一条探测轨迹，颜色为 CRP 簇，形状为队友。前三轴合计解释 {variance:.1%} 方差。'
+    note = f'每点为一条训练轨迹，颜色为入簇标签，形状为队友。前三轴合计解释 {variance:.1%} 方差。'
     pair_note = f'每格等权平均所列有向组合的回报。每对使用相同的 {n_maps} 张地图，簇内含原配。'
 
     fig = plt.figure(figsize=(16.8, 6.1))
@@ -139,7 +151,7 @@ def render_plots(directory, source, cluster_data, pca, assignments):
     image = _heatmap(left, original, source['ids'], '队友互换')
     middle = fig.add_subplot(grid[1], projection='3d')
     handles = _draw_pca(middle, pca, assignments, cluster_ids)
-    middle.set_title('行为嵌入 · 轨迹 PCA', fontsize=12, pad=12)
+    middle.set_title('行为嵌入 · 训练轨迹 PCA', fontsize=12, pad=12)
     right = fig.add_subplot(grid[2])
     _heatmap(right, matrix, cluster_ids, '按 CRP 簇汇总的交叉评估', counts=counts)
     fig.suptitle('LBF 正式队友的行为分簇与交叉评估', y=.963, fontsize=16)
@@ -148,19 +160,12 @@ def render_plots(directory, source, cluster_data, pca, assignments):
     cb = fig.colorbar(image, cax=fig.add_axes([.105,.12,.15,.018]), orientation='horizontal')
     cb.set_label('平均团队回报', fontsize=9)
     fig.text(.81,.12, f'每个组合共用 {n_maps} 张地图，对角线包括原配。', ha='center', fontsize=9)
-    fig.text(.5,.035,'每点为一条轨迹，颜色为 CRP 簇，形状为队友。', ha='center', fontsize=9)
+    fig.text(.5,.035,'每点为一条训练轨迹，颜色为入簇标签，形状为队友。', ha='center', fontsize=9)
     fig.savefig(directory/'figure6.png', dpi=180, bbox_inches='tight', pad_inches=.18)
     plt.close(fig)
 
-    fig = plt.figure(figsize=(7.2, 6.8))
-    ax = fig.add_axes([.06,.20,.85,.70], projection='3d')
-    handles = _draw_pca(ax, pca, assignments, cluster_ids)
-    fig.suptitle('LBF 队友的轨迹行为嵌入', fontsize=15)
-    fig.legend(handles=handles, loc='lower center', bbox_to_anchor=(.5,.075), ncol=4, frameon=False,
-               columnspacing=1.3, handletextpad=.3)
-    fig.text(.5,.032, note, ha='center', fontsize=9)
-    fig.savefig(directory/'behavior_embeddings.png', dpi=180)
-    plt.close(fig)
+    _embedding_figure(plt, directory/'behavior_embeddings.png', pca, assignments, cluster_ids,
+                      'LBF 队友的行为嵌入 · 训练轨迹', note)
 
     fig, ax = plt.subplots(figsize=(7.2, 6.2))
     fig.subplots_adjust(left=.13, right=.87, top=.87, bottom=.21)
@@ -173,10 +178,14 @@ def render_plots(directory, source, cluster_data, pca, assignments):
     plt.close(fig)
 
 
-def plot_run(directory, crossplay_path):
+def plot_run(directory, crossplay_path, heldout_embeddings=None):
     directory, crossplay_path = directory.resolve(), crossplay_path.resolve()
     if ROOT/'outputs' not in directory.parents:
         raise ValueError('Use a clustering run under project outputs/')
+    if heldout_embeddings is not None:
+        heldout_embeddings = heldout_embeddings.resolve()
+        if ROOT/'outputs' not in heldout_embeddings.parents:
+            raise ValueError('Use held-out embeddings under project outputs/')
     run = json.loads((directory/'clustering.json').read_text())
     manifest_path = (ROOT / run['pool_manifest']).resolve()
     if crossplay_path != manifest_path.with_name('crossplay.json'):
@@ -205,11 +214,81 @@ def plot_run(directory, crossplay_path):
     render_plots(directory, source, cluster_data, pca, assignments)
     for name, obj in [('cluster_crossplay.json', cluster_data), ('pca.json', pca)]:
         (directory/name).write_text(json.dumps(obj, indent=2, allow_nan=False) + '\n')
+    if heldout_embeddings is not None:
+        import matplotlib.pyplot as plt
+
+        heldout = json.loads(heldout_embeddings.read_text())
+        if heldout['checkpoint_sha256'] != hashlib.sha256((directory/'crp.pt').read_bytes()).hexdigest():
+            raise ValueError('Held-out embeddings come from a different model')
+        heldout_pca = project_embeddings(heldout['rows'], assignments)
+        silhouette = heldout['silhouette_16d']
+        silhouette_text = '未定义' if silhouette is None else f'{silhouette:.3f}'
+        note = (f'{len(heldout["map_seeds"])} 张留出地图，每张 8 名队友共用 T1 的两名搭档。颜色沿用训练入簇标签，形状为队友。\n'
+                f'PCA 在留出轨迹上拟合，前三轴解释 {sum(heldout_pca["explained_variance_ratio"]):.1%} 方差。'
+                f'原始 16 维轮廓系数 {silhouette_text}。')
+        _embedding_figure(plt, heldout_embeddings.with_suffix('.png'), heldout_pca, assignments,
+                          cluster_data['cluster_ids'], 'LBF 队友的行为嵌入 · 留出轨迹', note)
+
+
+def export_heldout_embeddings(directory, heldout_path):
+    """Encode fixed-T1 query trajectories and retain the member's original admission label."""
+    import sys
+    sys.path.insert(0, str(ROOT))
+    import torch
+    from fastap_methods.fastap_crp import BehaviorModel
+    from scripts.lbf_crp_heldout import evaluate_heldout
+
+    directory, heldout_path = directory.resolve(), heldout_path.resolve()
+    if not all(ROOT/'outputs' in path.parents for path in (directory, heldout_path)):
+        raise ValueError('Use the clustering run and held-out data under project outputs/')
+    run = json.loads((directory/'clustering.json').read_text())
+    checkpoint = directory/'crp.pt'
+    saved = torch.load(checkpoint, map_location='cpu', weights_only=True)
+    trials = torch.load(heldout_path, map_location='cpu', weights_only=True)
+    order = run['protocol']['order']
+    if {k: f'C{v+1}' for k, v in saved['crp']['assignments'].items()} != run['assignments']:
+        raise ValueError('Training assignments differ from the frozen encoder checkpoint')
+    manifest = ROOT / run['pool_manifest']
+    if (trials['pool_sha256'] != run['pool_manifest_sha256'] or
+            hashlib.sha256(manifest.read_bytes()).hexdigest() != trials['pool_sha256'] or
+            trials['members'] != order or trials['row_order'] != 'map_index * n_members + member_index'):
+        raise ValueError('Query trajectory identities or pool mismatch')
+    maps = trials['map_seeds']['query']
+    batch = trials['trials']['fixed_T1']['query']
+    starts = batch['state'][:, 0].reshape(len(maps), len(order), -1)
+    unique_starts = {row[0].numpy().tobytes() for row in starts}
+    training_starts = {probe[0][0].numpy().tobytes() for probe in saved['crp']['probes']}
+    if (not torch.equal(starts, starts[:, :1].expand_as(starts)) or len(unique_starts) != len(maps)
+            or not training_starts.isdisjoint(unique_starts)):
+        raise ValueError('Each query map must be shared across teammates and disjoint from training maps')
+    decoder = saved['crp'].get('decoder', 'paper')
+    model = BehaviorModel(**saved['model_args'], decoder=decoder)
+    model.load_state_dict(saved['crp']['model'])
+    crossplay = json.loads(manifest.with_name('crossplay.json').read_text())
+    query = dict(members=order, map_seeds=maps, trials={'fixed_T1': batch})
+    result = evaluate_heldout(model, run['assignments'], query, crossplay, include_rows=True)['heldout']['fixed_T1']
+    result.update(map_seeds=maps, members=order, label_source='training CRP assignments; no readmission',
+                  partner='fixed_T1', split='query', decoder=decoder, seed=run['protocol']['seed'],
+                  heldout_sha256=hashlib.sha256(heldout_path.read_bytes()).hexdigest(),
+                  checkpoint_sha256=hashlib.sha256(checkpoint.read_bytes()).hexdigest())
+    target = heldout_path.with_name(f'heldout_embeddings_{decoder}_seed{result["seed"]}.json')
+    target.write_text(json.dumps(result, indent=2, allow_nan=False) + '\n')
+    return target
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('run_dir', type=Path, help='directory containing clustering.json and embeddings.json')
-    parser.add_argument('--crossplay', type=Path, required=True, help='crossplay.json of the source teammate pool')
+    operation = parser.add_mutually_exclusive_group(required=True)
+    operation.add_argument('--crossplay', type=Path, help='plot the crossplay.json of the source teammate pool')
+    operation.add_argument('--export-query', type=Path, metavar='HELDOUT.PT',
+                           help='use the project PyTorch environment to export fixed-T1 query embeddings')
+    parser.add_argument('--heldout-embeddings', type=Path,
+                        help='also draw this run’s exported fixed-T1 query embeddings alongside their JSON')
     args = parser.parse_args()
-    plot_run(args.run_dir, args.crossplay)
+    if args.export_query:
+        if args.heldout_embeddings:
+            parser.error('--heldout-embeddings is used with --crossplay')
+        print(export_heldout_embeddings(args.run_dir, args.export_query))
+    else:
+        plot_run(args.run_dir, args.crossplay, args.heldout_embeddings)

@@ -56,7 +56,8 @@ def _food_outcomes(returns):
                 all_food=int(np.isclose(scores, 1.).sum()), mean_return=float(scores.mean()))
 
 
-def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own_original'):
+def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own_original',
+            probe_seed=None, decoder='paper'):
     """Run standalone, sequential MAP clustering on CPU and publish its audit artifacts."""
     pool_path = (ROOT / pool_path).resolve()
     output_dir = (ROOT / output_dir).resolve()
@@ -88,14 +89,14 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own
             if not group.probe_egos or len(group.probe_egos) != 2:
                 raise ValueError(f"Missing original QMIX partners for {group.name}; expected roles 0 and 1")
 
-    probe_seed = seed + 1
+    probe_seed = seed + 1 if probe_seed is None else probe_seed
     rng = np.random.default_rng(probe_seed)
     admissions, snapshots, assignments, clusters = [], [], {}, {}
     probe_outcomes = {}
     with closing(FastapRolloutEnv('lbf', groups, seed=probe_seed)) as env, torch.random.fork_rng(devices=[]):
         torch.random.default_generator.manual_seed(seed)
         model_args = dict(state_dim=env.state_shape, n_actions=env.n_actions, n_teammates=env.max_teammates)
-        crp = TeammateCRP(**model_args, alpha=cfg['alpha'], lr=cfg['lr'], device='cpu')
+        crp = TeammateCRP(**model_args, alpha=cfg['alpha'], lr=cfg['lr'], device='cpu', decoder=decoder)
         for i, group in enumerate(groups):
             episodes = collect_probe_episodes(env, i, rng, cfg['probe_episodes'],
                                               use_original_egos=use_original_egos)
@@ -124,7 +125,10 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own
                         order=order, groups_per_round=cfg['groups_per_round'], alpha=crp.alpha,
                         probe_episodes=cfg['probe_episodes'], crp_model_steps=cfg['crp_model_steps'],
                         lr=cfg['lr'], minibatch_size=crp.minibatch_size, model_args=model_args,
-                        episode_limit=env.episode_limit, probe_ego=probe_ego,
+                        episode_limit=env.episode_limit, probe_ego=probe_ego, decoder=decoder,
+                        training_objective=('mean of within-episode mean categorical action NLL'
+                                            if decoder == 'categorical' else 'Eq. 4 Gaussian trajectory mixture'),
+                        admission_evidence='sum of action log likelihoods over observed slots, steps and episodes',
                         ego_policy="original greedy QMIX partners" if use_original_egos else "uniform legal actions",
                         ego_policy_source=("roles 0 and 1 from the same verified frozen team checkpoint as role 2"
                                            if use_original_egos else "sampled uniformly from each ego's legal actions"),

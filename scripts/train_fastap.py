@@ -57,6 +57,8 @@ def train(args, free_bytes):
     overrides = dict(SMOKE_SETTINGS) if args.smoke else {}
     if args.steps is not None:
         overrides["t_max"] = args.steps
+    if args.crp_decoder is not None:
+        overrides["crp_decoder"] = args.crp_decoder
     method.update(overrides)
     # Command-line overrides take precedence over scene-specific settings as well.
     specific = method["scenes"][args.scene]
@@ -99,6 +101,7 @@ def main():
     parser.add_argument("--smoke", action="store_true", help="200-step run with smaller training batches")
     parser.add_argument("--steps", type=int, help="override the ego training step budget")
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--crp-decoder", choices=("paper", "categorical"), help="override the CRP behavior decoder")
     parser.add_argument("--teammate-source", choices=("pool", "online"), default="pool")
     parser.add_argument("--teammate-pool", type=project_path)
     parser.add_argument("--online-groups", type=int, default=8, help="maximum number of groups to train online")

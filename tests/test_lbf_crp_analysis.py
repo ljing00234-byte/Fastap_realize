@@ -11,6 +11,22 @@ from scripts.plot_lbf_crp import aggregate_crossplay, project_embeddings
 
 
 class LbfCrpAnalysisTests(unittest.TestCase):
+    def test_paired_replacements_and_current_encoder_centers(self):
+        from scripts.audit_lbf_crp_stability import refreshed_centers, replacement_bags
+
+        removed, added = [], []
+        for base, swaps in replacement_bags(32, 8):
+            self.assertEqual([slot for slot, _ in swaps], list(range(8)))
+            for slot, incoming in swaps:
+                self.assertNotIn(incoming, base)
+                removed.append(base[slot])
+                added.append(incoming)
+        self.assertEqual(sorted(added), sorted(removed))
+        self.assertEqual(sorted(removed), list(range(32)))
+        vectors = [torch.tensor([v]) for v in [1., 7., 5.]]
+        centers = refreshed_centers(vectors, [0, 1, 0])
+        self.assertEqual([v.item() for v in centers], [3., 7.])
+
     def test_standalone_crp_keeps_failed_probes_and_replays_the_same_start_in_both_modes(self):
         from fastap_agents import AgentSpec
         from fastap_methods.lbf_crp_analysis import ROOT, run_crp

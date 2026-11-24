@@ -140,6 +140,53 @@ class FastapLearnerTests(unittest.TestCase):
 
 
 class FastapCRPTests(unittest.TestCase):
+    def test_categorical_training_weights_episodes_equally_and_admission_sums_evidence(self):
+        torch.manual_seed(24)
+        crp = TeammateCRP(5, 6, 2, decoder='categorical', alpha=.5)
+        model = crp.model
+        with torch.no_grad():
+            model.categorical.weight.zero_()
+            model.categorical.bias.copy_(torch.arange(12).float().reshape(6, 2).T.flatten() / 2)
+        states = torch.randn(2, 4, 5)
+        actions = torch.tensor([[[0, 50], [99, 27], [41, 18]], [[5, 4], [2, 1], [4, 3]]])
+        slots = torch.ones_like(actions, dtype=torch.bool)
+        slots[0, 0, 1] = False
+        filled = torch.tensor([[True, False, False], [True, True, True]])
+        fields = states, actions, slots, filled
+        context = model.encode(*fields)
+        self.assertEqual(model.action_logits(states, context).shape, (2, 3, 2, 6))
+        log_p = model.categorical.bias.reshape(2, 6).log_softmax(-1)
+        short = log_p[0, 0]
+        long = (log_p[0, [5, 2, 4]] + log_p[1, [4, 1, 3]]).sum()
+        expected_loss = -(short + long / 6) / 2
+        torch.testing.assert_close(model.trajectory_log_prob(*fields, context), torch.stack((short, long)))
+        torch.testing.assert_close(model.episode_action_nll(*fields, context), -torch.stack((short, long / 6)))
+        observed_loss = crp.behavior_loss(*fields, context)
+        torch.testing.assert_close(observed_loss, expected_loss)
+        torch.testing.assert_close(torch.autograd.grad(observed_loss, model.categorical.bias)[0],
+                                   torch.autograd.grad(expected_loss, model.categorical.bias)[0])
+        batch = dict(zip(('state', 'teammate_actions', 'teammate_mask', 'filled'), fields))
+        crp.add_group('one', batch)
+        self.assertAlmostEqual(crp.last_model_loss, expected_loss.item(), places=5)
+        restored = TeammateCRP(5, 6, 2, decoder='categorical', alpha=1.)
+        restored.load_state_dict(crp.state_dict())
+        torch.testing.assert_close(restored.model.action_logits(states, context), model.action_logits(states, context))
+        with self.assertRaisesRegex(ValueError, 'decoder'):
+            TeammateCRP(5, 6, 2, alpha=.5).load_state_dict(crp.state_dict())
+
+    def test_paper_action_predictions_match_normalized_vertex_densities(self):
+        torch.manual_seed(17)
+        model = BehaviorModel(5, 6, 2)
+        states = torch.randn(3, 4, 5)
+        context = torch.randn(3, 16)
+        history = torch.cat((states[:, :-1], context[:, None].expand(-1, 3, -1)), -1)
+        decoded, _ = model.gru(history)
+        mean, raw_scale = model.gaussian(decoded).reshape(3, 3, 2, 2, 6).unbind(2)
+        scale = torch.nn.functional.softplus(raw_scale) + 1e-4
+        density = torch.distributions.Normal(mean.unsqueeze(-2), scale.unsqueeze(-2))
+        scores = density.log_prob(torch.eye(6)).sum(-1)
+        torch.testing.assert_close(model.action_logits(states, context).log_softmax(-1), scores.log_softmax(-1))
+
     def test_padding_and_absence_mask_for_encoder_and_decoder(self):
         torch.manual_seed(21)
         model = BehaviorModel(5, 3, 2).eval()
@@ -193,7 +240,9 @@ class FastapCRPTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'already assigned'):
             crp.add_group('one', data)
         restored = TeammateCRP(5, 3, 2, alpha=1)
-        restored.load_state_dict(copy.deepcopy(crp.state_dict()))
+        legacy = copy.deepcopy(crp.state_dict())
+        del legacy['decoder']
+        restored.load_state_dict(legacy)
         self.assertEqual(restored.add_group('two', data), crp.add_group('two', data))
         self.assertEqual(sum(restored.counts), 2)
         self.assertEqual(restored.alpha, .5)
