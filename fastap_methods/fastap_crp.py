@@ -49,6 +49,9 @@ class BehaviorModel(nn.Module):
         scale = F.softplus(scale_logits) + 1e-4
         active = slots & filled.unsqueeze(-1)
         target = F.one_hot(actions.masked_fill(~active, 0), self.n_actions).to(states.dtype)
+        return self._score_actions(mean, scale, target, active)
+
+    def _score_actions(self, mean, scale, target, active):
         scores = Normal(mean, scale).log_prob(target.flatten(-2)).reshape_as(target)
         return scores.masked_fill(~active.unsqueeze(-1), 0).sum((1, 2, 3))
 
@@ -65,6 +68,8 @@ class TeammateCRP:
     minibatch from the union of previously seen and current group trajectories.
     """
 
+    model_type = BehaviorModel
+
     def __init__(self, state_dim, n_actions, n_teammates, *, alpha, device='cpu', lr=.0005,
                  minibatch_size=32):
         if not (alpha > 0 and isfinite(alpha) and lr > 0 and minibatch_size > 0):
@@ -72,7 +77,7 @@ class TeammateCRP:
         self.alpha = alpha
         self.device = torch.device(device)
         self.minibatch_size = minibatch_size
-        self.model = BehaviorModel(state_dim, n_actions, n_teammates).to(self.device)
+        self.model = self.model_type(state_dim, n_actions, n_teammates).to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
         self.assignments = {}
         self.counts = []
@@ -101,6 +106,10 @@ class TeammateCRP:
                  slots[i, :length].clone(), valid[i, :length].clone())
                 for i, length in enumerate(valid.sum(1).tolist())]
 
+    def _model_loss(self, log_likelihood):
+        # Eq. 4 places the trajectory expectation INSIDE the logarithm.
+        return log(len(log_likelihood)) - torch.logsumexp(log_likelihood, dim=0)
+
     def _fit(self, probes, steps):
         self.model.train()
         for _ in range(steps):
@@ -108,8 +117,7 @@ class TeammateCRP:
             sample = _collate([probes[i] for i in indices], self.device)
             embedding = self.model.encode(*sample)
             log_likelihood = self.model.trajectory_log_prob(*sample, embedding)
-            # Eq. 4 places the trajectory expectation INSIDE the logarithm.
-            loss = log(len(indices)) - torch.logsumexp(log_likelihood, dim=0)
+            loss = self._model_loss(log_likelihood)
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 10., error_if_nonfinite=True)

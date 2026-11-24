@@ -75,6 +75,23 @@ envs/lbf-plot/bin/python -B scripts/plot_lbf_crp.py "$run_dir" --crossplay outpu
 
 `clustering.json` 记录成员、入簇顺序和各候选的后验打分依据，`embeddings.json` 保存每条探测轨迹的行为向量，`crp.pt` 保存探测数据和各次入簇时的模型。`figure6.png` 并排展示成员交叉评估、轨迹嵌入和簇间交叉评估。热力图复用同一正式池的有向实测回报，行指定原配的两个 ego，列指定换入的冻结队友。每个成员组合评估相同的 256 张地图，簇对的分数取块内所有组合的等权均值。`cluster_crossplay.json` 还单列排除原配后的簇内互换成绩。该汇总口径由本复现明确指定，论文未公开簇级评估的具体计算细节。
 
+要检查式（4）的训练权重和图 6 的分离效果，可以重放正式运行的 64 条探测轨迹。下面的审计固定队友、入簇顺序和地图，分别使用模型种子 7、17、27。每个模型在 32 张未见地图上分别用随机搭档和同一对训练好的 T1 搭档探测，共 512 局。用入簇时的标签计算最终编码器的轮廓系数，并比较换成同簇、跨簇其他队友时的实测回报。轮廓系数是本地诊断指标，论文未报告该数值。
+
+```bash
+source scripts/epymarl-env.sh
+export CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+audit_dir=outputs/fastap_lbf_formal_pool_01/crp_diagnostics/figure6_audit
+envs/epymarl/bin/python -B scripts/audit_lbf_crp.py fit "$audit_dir"
+envs/epymarl/bin/python -B scripts/audit_lbf_crp.py evaluate "$audit_dir"
+envs/lbf-plot/bin/python -B scripts/plot_lbf_crp_audit.py "$audit_dir"
+envs/epymarl/bin/python -B scripts/audit_lbf_crp_coverage.py "$audit_dir/coverage.json"
+envs/epymarl/bin/python -B scripts/audit_lbf_crp_selfplay.py "$audit_dir/selfplay.json"
+```
+
+复跑时选择新目录。`paper` 重放本项目对论文公式的实现，种子 7 的八次入簇会逐一核对原模型权重。其余设置是实现对照。`mean_nll` 交换对数与期望的次序，`discrete_eq4` 将高斯密度在六个动作上归一化，`refresh_centers` 则在当前编码器下重新计算已有簇中心。`report.json` 保存各组实际的训练权重集中次数、簇成员、训练与留出分离指标和有向交叉评估。`coverage.json` 使用固定的 T1 双人搭档，对比每名队友 8 张和 64 张配对训练地图；地图数量同时影响模型训练和入簇证据的累加。算法、动作表示及输入张量的具体口径可从脚本核对。[训练与评估对照](scripts/audit_lbf_crp.py) · [留出评估](scripts/lbf_crp_heldout.py) · [覆盖度对照](scripts/audit_lbf_crp_coverage.py)
+
+另一个独立对照用每个队友的原配双人采集训练轨迹，同时在原配搭档和公共搭档下评估。公共搭档组控制了其他两个角色的策略。`selfplay.json` 给出两套评估的分离度。[原配探测对照](scripts/audit_lbf_crp_selfplay.py)
+
 ## QMIX 基线模块
 
 在 LBF、PP 和 CN 中，先联合训练三名智能体，把第 3 名冻结为队友。用不同种子生成 8 名队友后，每局从池中抽取搭档，训练两个 ego。模块 README 提供这三个步骤的命令，以及智能体网络、QMIX 更新和队友生成的源码入口。

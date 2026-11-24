@@ -1,11 +1,48 @@
 import unittest
 
 import numpy as np
+import torch
 
 from scripts.plot_lbf_crp import aggregate_crossplay, project_embeddings
 
 
 class LbfCrpAnalysisTests(unittest.TestCase):
+    def test_joint_observations_use_real_slots_and_preserve_padding(self):
+        from contextlib import closing
+        from fastap_scenarios.foraging import ForagingWorld
+        from scripts.lbf_crp_observations import joint_observations
+
+        with closing(ForagingWorld(seed=7)) as world:
+            world.reset(n_teammates=1)
+            state = torch.from_numpy(world.state())
+            actual = torch.from_numpy(world.observations()).flatten()
+        result = joint_observations(torch.stack([state, torch.zeros_like(state)]))
+        torch.testing.assert_close(result[0], actual)
+        self.assertFalse(result[1].any())
+
+    def test_vertex_probability_is_gaussian_density_normalized_over_actions(self):
+        from scripts.audit_lbf_crp import AuditBehaviorModel
+        model = AuditBehaviorModel(3, 3, 2)
+        model.variant = 'discrete_eq4'
+        mean = torch.tensor([.2, -.7, .5, .4, .6, -.3]).reshape(1, 1, 6)
+        scale = torch.tensor([.8, .5, .4, .2, .7, .3]).reshape_as(mean)
+        target = torch.tensor([1., 0., 0., 0., 1., 0.]).reshape(1, 1, 2, 3)
+        active = torch.tensor([[[True, False]]])
+        dist = torch.distributions.Normal(mean.flatten()[:3], scale.flatten()[:3])
+        log_density = dist.log_prob(torch.eye(3)).sum(-1)
+        expected = log_density.log_softmax(0)[0]
+        torch.testing.assert_close(model._score_actions(mean, scale, target, active)[0], expected)
+
+    def test_eq4_and_mean_nll_weight_each_trajectory_as_reported(self):
+        from scripts.audit_lbf_crp import AuditCRP
+        for variant in ['paper', 'mean_nll']:
+            crp = AuditCRP(variant, state_dim=3, n_actions=3, n_teammates=1, alpha=.5)
+            ll = torch.tensor([-40., -21., -20.], requires_grad=True)
+            crp._model_loss(ll).backward()
+            expected = ll.detach().softmax(0) if variant == 'paper' else torch.ones(3) / 3
+            torch.testing.assert_close(-ll.grad, expected)
+            self.assertAlmostEqual(crp.max_weight[0], expected.max().item(), places=6)
+
     def test_directed_blocks_and_within_cluster_swaps(self):
         # The two C1 members are nonadjacent in the original matrix.
         matrix = [[1., .1, .2], [.3, 1., .9], [.6, .7, 1.]]
