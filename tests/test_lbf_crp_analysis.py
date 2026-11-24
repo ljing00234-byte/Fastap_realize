@@ -43,6 +43,38 @@ class LbfCrpAnalysisTests(unittest.TestCase):
             torch.testing.assert_close(-ll.grad, expected)
             self.assertAlmostEqual(crp.max_weight[0], expected.max().item(), places=6)
 
+    @torch.no_grad()
+    def test_admission_evidence_counts_only_observed_actions(self):
+        from fastap_methods.fastap_crp import BehaviorModel
+        from scripts.audit_lbf_crp_evidence import episode_scores
+
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(74)
+            model = BehaviorModel(state_dim=3, n_actions=3, n_teammates=2).eval()
+            states = torch.randn(1, 4, 3)
+            center = torch.randn(model.width)
+        actions = torch.tensor([[[0, 1], [2, -1], [-1, -1]]])
+        slots = torch.tensor([[[True, True], [True, False], [False, False]]])
+        filled = torch.tensor([[True, True, False]])
+        score, preference, mass = episode_scores(model, (states, actions, slots, filled), center)
+
+        # Enumerate the Gaussian score of every possible action at each observed slot.
+        expected_preference, expected_mass = 0., 0.
+        for _, step, slot in slots.nonzero().tolist():
+            one_slot = torch.zeros_like(slots)
+            one_slot[0, step, slot] = True
+            scores = []
+            for action in range(model.n_actions):
+                candidate = actions.clone()
+                candidate[0, step, slot] = action
+                scores.append(model.trajectory_log_prob(states, candidate, one_slot, filled, center[None]))
+            log_mass = torch.cat(scores).logsumexp(0).item()
+            expected_mass += log_mass
+            expected_preference += scores[actions[0, step, slot].item()].item() - log_mass
+        np.testing.assert_allclose(preference, [expected_preference], atol=1e-5)
+        np.testing.assert_allclose(mass, [expected_mass], atol=1e-5)
+        np.testing.assert_allclose(score, preference + mass, atol=1e-5)
+
     def test_directed_blocks_and_within_cluster_swaps(self):
         # The two C1 members are nonadjacent in the original matrix.
         matrix = [[1., .1, .2], [.3, 1., .9], [.6, .7, 1.]]

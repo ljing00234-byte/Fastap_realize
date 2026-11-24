@@ -92,6 +92,22 @@ envs/epymarl/bin/python -B scripts/audit_lbf_crp_selfplay.py "$audit_dir/selfpla
 
 另一个独立对照用每个队友的原配双人采集训练轨迹，同时在原配搭档和公共搭档下评估。公共搭档组控制了其他两个角色的策略。`selfplay.json` 给出两套评估的分离度。[原配探测对照](scripts/audit_lbf_crp_selfplay.py)
 
+要追查正式 CRP 的入簇决定，可以用原模型、原公式和已保存的轨迹重算。以下脚本使用上面的 CPU 环境设置，复跑时将 `check_dir` 设为新目录。
+
+```bash
+check_dir=outputs/fastap_lbf_formal_pool_01/crp_diagnostics/crossplay_admission_audit
+envs/epymarl/bin/python -B scripts/audit_lbf_crp_matrix.py "$check_dir/matrix.json"
+envs/lbf-plot/bin/python -B scripts/audit_lbf_crp_matrix.py --plot "$check_dir/matrix.json"
+envs/epymarl/bin/python -B scripts/audit_lbf_crp_evidence.py "$check_dir/admission_evidence.json"
+envs/epymarl/bin/python -B scripts/audit_lbf_crp_evidence.py --training-coverage "$check_dir/training_coverage.json"
+envs/epymarl/bin/python -B scripts/audit_lbf_crp_shared_histories.py "$check_dir/shared_histories.json"
+envs/epymarl/bin/python -B scripts/audit_lbf_crp_order.py "$check_dir/order.json"
+```
+
+`matrix.json` 比较原来的 256 张地图与另外 256 张地图，逐对报告双向互换回报与同一动作历史上的决策分歧。图中左侧按旧地图的回报排列成三组，右侧按正式 CRP 归属排列，两侧格子均显示新地图的回报。`admission_evidence.json` 重算每次入簇时的候选分数，并在固定模型与候选中心后逐次删去一局，检查选择是否改变。`order.json` 固定每位队友的八条轨迹，在相同模型种子下比较三种到达顺序。
+
+`training_coverage.json` 按实际抽到的轨迹累计每次更新的式（4）权重，并核对八次入簇时的模型权重。`shared_histories.json` 在 32 张新地图上采集两种搭档下的真实轨迹。在完全相同的历史上，分别查询两名冻结队友会选的动作，检查 T3、T8 入簇时的两个候选簇会得到什么分数。
+
 ## QMIX 基线模块
 
 在 LBF、PP 和 CN 中，先联合训练三名智能体，把第 3 名冻结为队友。用不同种子生成 8 名队友后，每局从池中抽取搭档，训练两个 ego。模块 README 提供这三个步骤的命令，以及智能体网络、QMIX 更新和队友生成的源码入口。
