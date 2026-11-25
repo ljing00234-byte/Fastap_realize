@@ -6,7 +6,7 @@ from unittest.mock import patch
 import torch
 
 from fastap_agents.fastap import FastapAgent, FastapAgentSpec
-from fastap_methods.fastap_crp import BehaviorModel, TeammateCRP
+from fastap_methods.fastap_crp import BehaviorModel, TeammateCRP, sample_action_mask
 from fastap_methods.fastap_learner import FastapLearner, _context_loss
 
 
@@ -140,6 +140,89 @@ class FastapLearnerTests(unittest.TestCase):
 
 
 class FastapCRPTests(unittest.TestCase):
+    def test_action_span_draws_only_live_targets_and_keeps_context_for_short_episodes(self):
+        filled = torch.arange(8)[None, :] < torch.tensor([[8], [6], [1], [5]])
+        slots = filled.unsqueeze(-1).expand(-1, -1, 2).clone()
+        slots[1, :, 1] = False
+        slots[1, [0, 2, 3, 5], 0] = False
+        slots[2, :, 1] = False
+        slots[3, 2] = False
+        generator = torch.Generator().manual_seed(17)
+        global_state = torch.get_rng_state()
+        for _ in range(12):
+            mask = sample_action_mask(slots, filled, 3, generator)
+            self.assertTrue(mask.any((1, 2)).all())
+            self.assertFalse((mask & ~(slots & filled.unsqueeze(-1))).any())
+            steps = torch.where(mask[0, :, 0])[0]
+            torch.testing.assert_close(steps, torch.arange(steps[0], steps[0] + 3))
+            self.assertTrue(torch.equal(mask[0, :, 0], mask[0, :, 1]))
+            self.assertEqual(mask[1].sum().item(), 1)
+            self.assertEqual(mask[2].sum().item(), 1)
+            self.assertTrue((slots[3] & ~mask[3]).any())
+        torch.testing.assert_close(torch.get_rng_state(), global_state)
+        with self.assertRaisesRegex(ValueError, 'at least one'):
+            sample_action_mask(torch.zeros_like(slots), filled, 3, generator)
+
+    def test_masked_encoder_hides_actions_only_and_auxiliary_scores_hidden_targets(self):
+        torch.manual_seed(11)
+        crp = TeammateCRP(5, 3, 2, alpha=.5, decoder='categorical', masked_action_weight=.5)
+        data = sample()
+        states, actions, slots, filled = [data[key] for key in ('state', 'teammate_actions', 'teammate_mask', 'filled')]
+        hidden = torch.zeros_like(slots)
+        hidden[0, 1, 0] = hidden[1, :2, 0] = True
+        hidden[1, 1, 1] = True
+        inputs = []
+        with crp.model.token.register_forward_pre_hook(lambda module, args: inputs.append(args[0].detach())):
+            context = crp.model.encode(states, actions, slots, filled, action_mask=hidden)
+        tokens = inputs[0]
+        torch.testing.assert_close(tokens[:, :, :5], states)
+        previous = tokens[:, 1:, 5:].reshape(2, 3, 2, 3)
+        torch.testing.assert_close(previous[hidden], torch.full_like(previous[hidden], 1/3))
+        self.assertFalse(previous[~slots].any())
+        live = slots & ~hidden
+        torch.testing.assert_close(previous[live], torch.nn.functional.one_hot(actions[live], 3).float())
+        # Even arbitrary sentinel IDs at hidden positions cannot reach the encoder.
+        torch.testing.assert_close(context, crp.model.encode(states, actions.masked_fill(hidden, 99), slots,
+                                                            filled, action_mask=hidden))
+        logits = crp.model.action_logits(states, context)
+        expected_aux = torch.stack([torch.nn.functional.cross_entropy(row[mask], target[mask])
+                                    for row, target, mask in zip(logits, actions, hidden)]).mean()
+        full = crp.model.encode(states, actions, slots, filled)
+        expected_main = crp.model.episode_action_nll(states, actions, slots, filled, full).mean()
+        with patch('fastap_methods.fastap_crp.sample_action_mask', return_value=hidden), \
+                patch.object(torch, 'randperm', return_value=torch.arange(2)):
+            crp._fit(crp._unpack(data), steps=1)
+        self.assertAlmostEqual(crp.last_reconstruction_loss, expected_main.item(), places=5)
+        self.assertAlmostEqual(crp.last_masked_action_loss, expected_aux.item(), places=5)
+        self.assertAlmostEqual(crp.last_model_loss, (expected_main + .5 * expected_aux).item(), places=5)
+
+    def test_masked_checkpoint_resumes_rng_and_old_checkpoints_keep_full_reconstruction(self):
+        torch.manual_seed(13)
+        opts = dict(alpha=.5, decoder='categorical')
+        first = TeammateCRP(5, 3, 2, masked_action_weight=.5, masked_action_span=2, mask_seed=8, **opts)
+        with self.assertRaisesRegex(ValueError, 'categorical decoder'):
+            TeammateCRP(5, 3, 2, alpha=.5, masked_action_weight=.5)
+        group = sample()
+        first.add_group('one', group, model_steps=2)
+        snapshot = copy.deepcopy(first.state_dict())
+        resumed = TeammateCRP(5, 3, 2, mask_seed=99, **opts)
+        resumed.load_state_dict(snapshot)
+        for crp in (first, resumed):
+            torch.manual_seed(23)
+            crp.add_group('two', group, model_steps=3)
+        self.assertEqual(first.last_masked_action_loss, resumed.last_masked_action_loss)
+        self.assertEqual(first.assignments, resumed.assignments)
+        for k, tensor in first.model.state_dict().items():
+            self.assertTrue(torch.equal(tensor, resumed.model.state_dict()[k]))
+        for key in ('mask_generator_state', 'masked_action_span', 'masked_action_weight',
+                    'last_reconstruction_loss', 'last_masked_action_loss'):
+            del snapshot[key]
+        resumed.load_state_dict(snapshot)
+        with patch('fastap_methods.fastap_crp.sample_action_mask', side_effect=AssertionError):
+            resumed.add_group('next', group)
+        self.assertIsNone(resumed.last_masked_action_loss)
+        self.assertEqual(resumed.last_model_loss, resumed.last_reconstruction_loss)
+
     def test_categorical_training_weights_episodes_equally_and_admission_sums_evidence(self):
         torch.manual_seed(24)
         crp = TeammateCRP(5, 6, 2, decoder='categorical', alpha=.5)

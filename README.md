@@ -165,6 +165,26 @@ done
 
 `partition_scores.json` 对照隐藏的规则标签计算调整兰德指数（ARI）。`rule_prediction.json` 比较相同身份、同规则另一副本、错配表示和仅状态模型的动作负对数似然。`positive_control.json` 记录两项对照：给定类型数，用装载和靠近食物的频率做层次聚类；给定候选规则，用观测动作的似然识别规则。两项对照使用同一批轨迹。
 
+### LBF 同局动作补全
+
+在 `categorical` 解码器上设置 `--masked-action-weight 1 --masked-action-span 3`，每次更新对同一批轨迹做两次 A→A 重建。第一次使用完整轨迹。第二次为每局随机遮住最多连续三步队友动作，将这些动作的输入替换为均匀向量，并仅在被遮位置计算交叉熵。两项损失都先在局内取平均，再给每局相同权重。辅助任务系数为 0 时运行原离散基线。正式 LBF 分簇入口和 Fastap 训练入口都支持这两个参数。
+
+下例复用前一节的匿名规则轨迹和基线检查点。留出测试让新旧模型补全完全相同的位置，分别统计全部有效动作和食物可见、尚不能装载时的移动选择。编码器能看到整局状态，因此这里测量的是同局回溯补全。入簇使用完整轨迹。
+
+```bash
+source scripts/epymarl-env.sh
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=""
+reference=outputs/lbf_rule_blind_v1
+experiment=outputs/lbf_rule_masked_span_v1
+python_bin=envs/epymarl/bin/python
+"$python_bin" -B scripts/validate_lbf_rule_clusters.py fit "$experiment" --data-dir "$reference" \
+    --decoder categorical --masked-action-weight 1 --masked-action-span 3
+"$python_bin" -B scripts/validate_lbf_rule_clusters.py transfer "$experiment" --data-dir "$reference" \
+    --paired-control "$reference"
+"$python_bin" -B scripts/validate_lbf_rule_clusters.py score "$experiment" --data-dir "$reference"
+"$python_bin" -B scripts/evaluate_lbf_masked_completion.py "$reference" "$experiment" --span 3
+```
+
 ## QMIX 基线模块
 
 在 LBF、PP 和 CN 中，先联合训练三名智能体，把第 3 名冻结为队友。用不同种子生成 8 名队友后，每局从池中抽取搭档，训练两个 ego。模块 README 提供这三个步骤的命令，以及智能体网络、QMIX 更新和队友生成的源码入口。

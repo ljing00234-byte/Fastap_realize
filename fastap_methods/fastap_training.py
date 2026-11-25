@@ -11,7 +11,7 @@ import torch
 from torch.nn import functional as F
 
 from fastap_agents import FastapAgent, FastapAgentSpec
-from .fastap_crp import TeammateCRP
+from .fastap_crp import TeammateCRP, validate_masked_action_config
 from .fastap_learner import FastapLearner
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -153,7 +153,9 @@ def _fit(scene, env, probe_env, agent, cfg, seed, run_dir, log, world_options, g
         'target_interval', 'bootstrap_at_time_limit', 'grad_norm_clip')})
     device = next(agent.parameters()).device
     crp = TeammateCRP(env.state_shape, env.n_actions, env.max_teammates,
-                      alpha=cfg['alpha'], device=device, lr=cfg['lr'], decoder=cfg.get('crp_decoder', 'paper'))
+                      alpha=cfg['alpha'], device=device, lr=cfg['lr'], decoder=cfg.get('crp_decoder', 'paper'),
+                      masked_action_weight=cfg.get('masked_action_weight', 0.),
+                      masked_action_span=cfg.get('masked_action_span', 3), mask_seed=seed)
     rng = np.random.default_rng(seed)
     probe_rng = np.random.default_rng(seed + 1)
     members = {}
@@ -181,10 +183,12 @@ def _fit(scene, env, probe_env, agent, cfg, seed, run_dir, log, world_options, g
                 replay.admit(cluster)
                 returns = [ep['reward'].sum().item() for ep in probes]
                 food_counts = {'probe_episodes_with_food': sum(r > 0 for r in returns)} if scene == 'lbf' else {}
+                model_losses = dict(reconstruction_loss=crp.last_reconstruction_loss,
+                                    masked_action_loss=crp.last_masked_action_loss) if crp.masked_action_weight else {}
                 record(event="admit", group=name, cluster=cluster, probe_steps=probe_steps,
                        probe_episodes=len(probes), probe_return_mean=float(np.mean(returns)),
                        probe_ego_policy='original_partners' if group.probe_egos else 'random_legal',
-                       model_loss=crp.last_model_loss, **food_counts)
+                       model_loss=crp.last_model_loss, **model_losses, **food_counts)
                 next_group = idx + 1
             next_round = step + cfg['group_interval_steps']
         # Warm each new cluster's replay, then sample clusters and their members uniformly.
@@ -236,6 +240,8 @@ def train_fastap(*, scene_config, agent_config, method_config, run_dir, seed=7, 
         if teammate_groups is not None or type(max_groups) is not int or max_groups < 1:
             raise ValueError("Supply a generator with positive max_groups or a fixed teammate pool")
     cfg = {**method_config, **method_config['scenes'][scene]}
+    validate_masked_action_config(cfg.get('crp_decoder', 'paper'), cfg.get('masked_action_weight', 0.),
+                                  cfg.get('masked_action_span', 3))
     interval = options.get('switch_interval') or cfg['switch_interval']
     cfg['switch_interval'] = tuple(interval)
     if len(interval) != 2 or not 1 <= interval[0] <= interval[1]:

@@ -26,3 +26,6 @@ switch_interval: [5, 8]
 group_interval_steps: 50000
 probe_episodes: 8
 crp_model_steps: 64
+# Optional same-episode action completion for the categorical CRP decoder.
+masked_action_weight: 0.0
+masked_action_span: 3

@@ -57,7 +57,7 @@ def _food_outcomes(returns):
 
 
 def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own_original',
-            probe_seed=None, decoder='paper'):
+            probe_seed=None, decoder=None, masked_action_weight=None, masked_action_span=None):
     """Run standalone, sequential MAP clustering on CPU and publish its audit artifacts."""
     pool_path = (ROOT / pool_path).resolve()
     output_dir = (ROOT / output_dir).resolve()
@@ -70,6 +70,11 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own
     if method_config is None:
         method_config = yaml.safe_load((ROOT / 'configs/methods/fastap.yaml').read_text())
     cfg = {**method_config, **method_config['scenes']['lbf']}
+    decoder = cfg.get('crp_decoder', 'paper') if decoder is None else decoder
+    if masked_action_weight is None:
+        masked_action_weight = cfg.get('masked_action_weight', 0.)
+    if masked_action_span is None:
+        masked_action_span = cfg.get('masked_action_span', 3)
     for key in ('probe_episodes', 'crp_model_steps', 'groups_per_round'):
         if type(cfg[key]) is not int or cfg[key] < 1:
             raise ValueError(f"{key} must be a positive integer")
@@ -96,7 +101,9 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own
     with closing(FastapRolloutEnv('lbf', groups, seed=probe_seed)) as env, torch.random.fork_rng(devices=[]):
         torch.random.default_generator.manual_seed(seed)
         model_args = dict(state_dim=env.state_shape, n_actions=env.n_actions, n_teammates=env.max_teammates)
-        crp = TeammateCRP(**model_args, alpha=cfg['alpha'], lr=cfg['lr'], device='cpu', decoder=decoder)
+        crp = TeammateCRP(**model_args, alpha=cfg['alpha'], lr=cfg['lr'], device='cpu', decoder=decoder,
+                          masked_action_weight=masked_action_weight, masked_action_span=masked_action_span,
+                          mask_seed=seed)
         for i, group in enumerate(groups):
             episodes = collect_probe_episodes(env, i, rng, cfg['probe_episodes'],
                                               use_original_egos=use_original_egos)
@@ -115,6 +122,9 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own
                                    last_model_loss=crp.last_model_loss,
                                    candidates=_candidate_scores(counts, crp.alpha,
                                                                 crp.last_assignment_log_scores.tolist())))
+            if masked_action_weight:
+                admissions[-1].update(last_reconstruction_loss=crp.last_reconstruction_loss,
+                                      last_masked_action_loss=crp.last_masked_action_loss)
             # Each snapshot can replay that exact assignment on the stored probe slice,
             # even after subsequent fitting changes the encoder and decoder parameters.
             snapshots.append(dict(teammate=group.name, probe_slice=probe_slice, counts_before=counts,
@@ -135,6 +145,10 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own
                         teammate_role=manifest['role'], active_teammates=1,
                         device='cpu', torch_threads=torch.get_num_threads(),
                         torch_version=str(torch.__version__), numpy_version=np.__version__)
+        if masked_action_weight:
+            protocol.update(masked_action_weight=masked_action_weight, masked_action_span=masked_action_span,
+                            mask_seed=seed, training_objective='full episode categorical NLL plus weighted '
+                            'categorical NLL on a hidden action span of the same episode; both episode-balanced')
     all_returns = [value for item in probe_outcomes.values() for value in item['episode_returns']]
     summary = dict(pool_manifest=str(pool_path.relative_to(ROOT)),
                    pool_manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),

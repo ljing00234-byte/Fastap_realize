@@ -69,6 +69,14 @@ class LbfCrpAnalysisTests(unittest.TestCase):
                 self.assertEqual(summary['probe_outcomes']['per_group'][member['id']]['episode_returns'], [0.])
             legacy = run_crp(pool, random_dir, method_config=config, probe_ego='random_legal')
             self.assertEqual(legacy['protocol']['probe_ego'], 'random_legal')
+            masked = run_crp(pool, base / 'masked', method_config=config, decoder='categorical',
+                             masked_action_weight=.5, masked_action_span=2)
+            self.assertEqual(masked['protocol']['masked_action_span'], 2)
+            self.assertEqual(masked['probe_outcomes'], summary['probe_outcomes'])
+            for event in masked['admissions']:
+                self.assertGreater(event['last_masked_action_loss'], 0.)
+                self.assertAlmostEqual(event['last_model_loss'], event['last_reconstruction_loss']
+                                       + .5 * event['last_masked_action_loss'], places=5)
             own, random = [torch.load(directory / 'crp.pt', weights_only=True, map_location='cpu')['crp']['probes']
                            for directory in (own_dir, random_dir)]
             self.assertEqual(len(own), len(random))
