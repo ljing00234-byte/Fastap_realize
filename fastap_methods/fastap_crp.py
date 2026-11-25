@@ -115,10 +115,13 @@ class TeammateCRP:
     model_type = BehaviorModel
 
     def __init__(self, state_dim, n_actions, n_teammates, *, alpha, device='cpu', lr=.0005,
-                 minibatch_size=32, decoder='paper'):
+                 minibatch_size=32, decoder='paper', center_mode='historical'):
         if not (alpha > 0 and isfinite(alpha) and lr > 0 and minibatch_size > 0):
             raise ValueError("Invalid CRP concentration or optimizer settings")
+        if center_mode not in ('historical', 'current_encoder'):
+            raise ValueError("center_mode must be historical or current_encoder")
         self.alpha = alpha
+        self.center_mode = center_mode
         self.device = torch.device(device)
         self.minibatch_size = minibatch_size
         # Existing paper-model subclasses can keep their three-argument constructor.
@@ -129,8 +132,11 @@ class TeammateCRP:
         self.counts = []
         self.centers = []
         self._probes = []
+        self.member_probe_slices = {}
         self.last_model_loss = None
         self.last_assignment_log_scores = None
+        self.last_centers_before = []
+        self.last_candidate_centers = []
 
     def _unpack(self, batch):
         valid = batch['filled'].bool().cpu()
@@ -174,26 +180,50 @@ class TeammateCRP:
             self.optimizer.step()
         self.last_model_loss = loss.detach().item()
 
+    def _batches(self, group):
+        for start in range(0, len(group), self.minibatch_size):
+            yield group[start:start + self.minibatch_size]
+
+    def _group_mean(self, group):
+        return sum(self.model.encode(*_collate(probes, self.device)).sum(0)
+                   for probes in self._batches(group)) / len(group)
+
+    def _existing_centers(self):
+        if self.center_mode == 'historical':
+            return list(self.centers)
+        if self.member_probe_slices is None:
+            raise ValueError("Current-encoder centers require the original probe slices for every member")
+        centers = [None] * len(self.counts)
+        counts = [0] * len(self.counts)
+        # Match the original running mean's order and give each admitted member
+        # equal weight even when members have different numbers of episodes.
+        for name, label in self.assignments.items():
+            start, stop = self.member_probe_slices[name]
+            vector = self._group_mean(self._probes[start:stop])
+            n = counts[label]
+            centers[label] = vector if n == 0 else (n * centers[label] + vector) / (n + 1)
+            counts[label] += 1
+        return centers
+
     @torch.no_grad()
     def _assign(self, group):
         self.model.eval()
-        # The current group may itself exceed one training minibatch.
-        batches = [group[start:start + self.minibatch_size]
-                   for start in range(0, len(group), self.minibatch_size)]
-        vector = sum(self.model.encode(*_collate(probes, self.device)).sum(0)
-                     for probes in batches) / len(group)
-        candidates = [(n * center + vector) / (n + 1) for n, center in zip(self.counts, self.centers)]
+        vector = self._group_mean(group)
+        existing = self._existing_centers()
+        candidates = [(n * center + vector) / (n + 1) for n, center in zip(self.counts, existing)]
         candidates.append(vector)
         # The common CRP normalizer K+alpha cancels in the MAP. Independent
         # trajectories from the new group contribute additive log evidence.
         scores = vector.new_tensor([*self.counts, self.alpha], dtype=torch.float64).log()
-        for probes in batches:
+        for probes in self._batches(group):
             sample = _collate(probes, self.device)
             for i, center in enumerate(candidates):
                 evidence = self.model.trajectory_log_prob(*sample, center.expand(len(probes), -1))
                 scores[i] += evidence.double().sum()
         if not scores.isfinite().all():
             raise FloatingPointError("Nonfinite predictive likelihood in CRP")
+        self.last_centers_before = existing
+        self.last_candidate_centers = candidates
         self.last_assignment_log_scores = scores.detach()
         label = scores.argmax().item()
         return label, candidates[label].detach()
@@ -205,13 +235,22 @@ class TeammateCRP:
             raise ValueError("At least one behavior-model update is required before assignment")
         group = self._unpack(batch)
         self._fit(self._probes + group, model_steps)
+        return self.admit_probes(name, group)
+
+    def admit_probes(self, name, group):
+        """Assign compact trajectories from _unpack using the fitted model, with no optimizer update."""
+        if name in self.assignments or not group:
+            raise ValueError("Expected a new teammate group with at least one probe")
         label, center = self._assign(group)
+        self.centers = list(self.last_centers_before)
         if label == len(self.counts):
             self.counts.append(1)
             self.centers.append(center)
         else:
             self.counts[label] += 1
             self.centers[label] = center
+        if self.member_probe_slices is not None:
+            self.member_probe_slices[name] = (len(self._probes), len(self._probes) + len(group))
         self._probes.extend(group)
         self.assignments[name] = label
         return label
@@ -220,18 +259,50 @@ class TeammateCRP:
         return dict(model=self.model.state_dict(), optimizer=self.optimizer.state_dict(),
                     assignments=dict(self.assignments), counts=list(self.counts), centers=list(self.centers),
                     probes=list(self._probes), alpha=self.alpha, minibatch_size=self.minibatch_size,
-                    decoder=self.model.decoder,
+                    decoder=self.model.decoder, center_mode=self.center_mode,
+                    member_probe_slices=None if self.member_probe_slices is None else dict(self.member_probe_slices),
                     last_model_loss=self.last_model_loss,
                     last_assignment_log_scores=self.last_assignment_log_scores)
 
-    def load_state_dict(self, saved):
+    def load_state_dict(self, saved, *, probe_slices=None):
+        """Legacy checkpoints can use member-to-[start,stop] slices from their admission records."""
         if saved.get('decoder', 'paper') != self.model.decoder:
             raise ValueError("Saved CRP decoder does not match the model")
+        if saved.get('center_mode', self.center_mode) != self.center_mode:
+            raise ValueError("Saved CRP center_mode does not match the requested mode")
+        assignments = saved['assignments']
+        n_probes = len(saved['probes'])
+        stored_slices = saved.get('member_probe_slices')
+        slices = stored_slices if probe_slices is None else probe_slices
+        if slices is None and len(assignments) == 1:
+            slices = {next(iter(assignments)): (0, n_probes)}
+        elif slices is None and len(assignments) == n_probes:
+            slices = {name: (i, i + 1) for i, name in enumerate(assignments)}
+        if slices is not None:
+            if set(slices) != set(assignments):
+                raise ValueError("Probe slices must identify every admitted member")
+            checked = {}
+            cursor = 0
+            for name in assignments:
+                start, stop = slices[name]
+                if (type(start) is not int or type(stop) is not int or start != cursor or stop <= start
+                        or (stored_slices is not None and (start, stop) != tuple(stored_slices[name]))):
+                    raise ValueError("Inconsistent probe slices for admitted members")
+                checked[name] = (start, stop)
+                cursor = stop
+            if cursor != n_probes:
+                raise ValueError("Probe slices must cover all saved trajectories")
+            slices = checked
+        elif self.center_mode == 'current_encoder':
+            raise ValueError("Legacy checkpoint needs explicit probe slices for current-encoder centers")
         self.model.load_state_dict(saved['model'])
         self.optimizer.load_state_dict(saved['optimizer'])
         self.alpha, self.minibatch_size = saved['alpha'], saved['minibatch_size']
         self.assignments, self.counts = dict(saved['assignments']), list(saved['counts'])
         self.centers = [center.to(self.device) for center in saved['centers']]
         self._probes = [tuple(field.cpu() for field in probe) for probe in saved['probes']]
+        self.member_probe_slices = slices
+        self.last_centers_before = []
+        self.last_candidate_centers = []
         self.last_model_loss = saved['last_model_loss']
         self.last_assignment_log_scores = saved.get('last_assignment_log_scores')

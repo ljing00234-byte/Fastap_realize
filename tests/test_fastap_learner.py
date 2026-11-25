@@ -140,6 +140,75 @@ class FastapLearnerTests(unittest.TestCase):
 
 
 class FastapCRPTests(unittest.TestCase):
+    def test_refresh_reencodes_prior_members_and_averages_members_equally(self):
+        models = [TeammateCRP(5, 3, 2, alpha=.5, decoder='categorical', minibatch_size=2, center_mode=mode)
+                  for mode in ('historical', 'current_encoder')]
+        templates = models[0]._unpack(sample())
+        scale = 1.
+
+        def make_probes(values):
+            probes = []
+            for i, value in enumerate(values):
+                state, *rest = templates[i % len(templates)]
+                state = state.clone()
+                state[0, 0] = value
+                probes.append((state, *rest))
+            return probes
+
+        def encode(states, *args):
+            return (scale * states[:, 0, 0:1]).expand(-1, 16)
+
+        # Equal evidence leaves the CRP count prior to choose the established cluster.
+        for crp in models:
+            with patch.object(crp.model, 'encode', side_effect=encode), patch.object(
+                    crp.model, 'trajectory_log_prob', side_effect=lambda states, *args: states[:, 0, 0]*0):
+                scale = 1.
+                crp.admit_probes('first', make_probes([1.]))
+                crp.admit_probes('second', make_probes([3., 5., 7.]))
+                scale = 10.
+                crp.admit_probes('third', make_probes([9., 11.]))
+            self.assertEqual(crp.assignments, {'first': 0, 'second': 0, 'third': 0})
+            self.assertEqual(crp.member_probe_slices, {'first': (0, 1), 'second': (1, 4), 'third': (4, 6)})
+        for crp, old_center in zip(models, (3., 30.)):
+            torch.testing.assert_close(crp.last_centers_before[0], torch.full((16,), old_center))
+            torch.testing.assert_close(crp.last_candidate_centers[0], torch.full((16,), (2 * old_center + 100) / 3))
+            torch.testing.assert_close(crp.last_candidate_centers[1], torch.full((16,), 100.))
+            torch.testing.assert_close(crp.last_assignment_log_scores, torch.tensor([2., .5]).double().log())
+
+    def test_frozen_encoder_modes_match_exactly_and_legacy_slices_enable_resuming(self):
+        torch.manual_seed(5)
+        kwargs = dict(state_dim=5, n_actions=3, n_teammates=2, alpha=.5, minibatch_size=2, decoder='categorical')
+        old = TeammateCRP(**kwargs)
+        current = TeammateCRP(**kwargs, center_mode='current_encoder')
+        current.model.load_state_dict(old.model.state_dict())
+        for i in range(6):
+            probes = old._unpack(sample())[:1 + i % 2]
+            self.assertEqual(old.admit_probes(str(i), probes), current.admit_probes(str(i), probes))
+            self.assertTrue(torch.equal(old.last_assignment_log_scores, current.last_assignment_log_scores))
+        saved = current.state_dict()
+        legacy = {k: v for k, v in saved.items() if k not in ('member_probe_slices', 'center_mode')}
+        resumed = TeammateCRP(**kwargs, center_mode='current_encoder')
+        with self.assertRaisesRegex(ValueError, 'explicit probe slices'):
+            resumed.load_state_dict(legacy)
+        previous = TeammateCRP(**kwargs)
+        previous.load_state_dict(legacy)
+        self.assertIsNone(previous.member_probe_slices)
+        invalid = dict(saved['member_probe_slices'], **{'0': (0, 2)})
+        with self.assertRaisesRegex(ValueError, 'probe slices'):
+            resumed.load_state_dict(legacy, probe_slices=invalid)
+        resumed.load_state_dict(legacy, probe_slices=saved['member_probe_slices'])
+        data = sample()
+        for model in (resumed, current):
+            torch.manual_seed(8)
+            model.add_group('next', data)
+        self.assertEqual(resumed.assignments, current.assignments)
+        self.assertTrue(torch.equal(resumed.last_assignment_log_scores, current.last_assignment_log_scores))
+        roundtrip = TeammateCRP(**kwargs, center_mode='current_encoder')
+        roundtrip.load_state_dict(resumed.state_dict())
+        self.assertEqual(roundtrip.member_probe_slices, resumed.member_probe_slices)
+        for a, b in zip(roundtrip.centers, resumed.centers):
+            self.assertTrue(torch.equal(a, b))
+
     def test_categorical_training_weights_episodes_equally_and_admission_sums_evidence(self):
         torch.manual_seed(24)
         crp = TeammateCRP(5, 6, 2, decoder='categorical', alpha=.5)

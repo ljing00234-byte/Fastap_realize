@@ -176,6 +176,28 @@ selected=outputs/lbf_rule_informative_starts_v1
 "$python_bin" -B scripts/evaluate_lbf_probe_starts.py "$experiment" "$selected"
 ```
 
+### LBF 逐动作核对入簇得分
+
+离散解码器的正式分簇入口会在 `admission_actions.jsonl` 中逐次记录一个队友的入簇决定。每个有效动作都有地图编号（共享开局）、局内步数、队友槽位和各候选簇给该动作的对数概率。新簇与最佳已有簇的总分差等于两者的对数先验差加上这些动作的对数概率差之和。报告按动作和采食机会分别汇总，并记录浮点求和误差。累计分数按已收集的完整轨迹回看，每次决定实际使用该队友的全部八局。
+
+默认 `--center-mode historical` 使用各簇保存的旧中心。对照选项 `--center-mode current_encoder` 在每次行为模型更新后，用当前编码器重新计算已入簇队友的表示，先在每名队友的轨迹间取平均，再对同一簇内的队友取平均。两种方式均使用相同的 CRP 计数先验和整局动作似然。完整 Fastap 训练入口的对应选项是 `--crp-center-mode`。
+
+以下命令复用上一节的规则队友数据和上一轮正式队友的历史中心结果。规则盲测用当时每次入簇的模型快照，在两种留出地图上对照同类拆分、异类合并和跨种子一致性。另用固定的最终编码器核对两种方式应当一致的结果。正式池审计逐个核对两组实验的模型参数、轨迹和入簇总分，输出每次决定的逐动作明细。
+
+```bash
+source scripts/epymarl-env.sh
+export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=""
+python_bin=envs/epymarl/bin/python
+audit_dir=outputs/lbf_admission_centers_v1
+reference=outputs/fastap_lbf_formal_pool_01/crp_probe_starts_v1/shared_preload
+"$python_bin" -B scripts/audit_lbf_rule_admissions.py "$audit_dir/rules"
+for seed in 7 17 27; do
+    "$python_bin" -B scripts/cluster_lbf_teammates.py "$audit_dir/formal/current_encoder/seed$seed" \
+        --probe-starts shared_preload --probe-seed 8 --seed "$seed" --decoder categorical --center-mode current_encoder
+done
+"$python_bin" -B scripts/audit_lbf_pool_admissions.py "$reference" "$audit_dir/formal/current_encoder" "$audit_dir/formal/trace"
+```
+
 ## QMIX 基线模块
 
 在 LBF、PP 和 CN 中，先联合训练三名智能体，把第 3 名冻结为队友。用不同种子生成 8 名队友后，每局从池中抽取搭档，训练两个 ego。模块 README 提供这三个步骤的命令，以及智能体网络、QMIX 更新和队友生成的源码入口。

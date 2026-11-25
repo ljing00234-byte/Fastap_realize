@@ -59,6 +59,8 @@ def train(args, free_bytes):
         overrides["t_max"] = args.steps
     if args.crp_decoder is not None:
         overrides["crp_decoder"] = args.crp_decoder
+    if args.crp_center_mode is not None:
+        overrides["crp_center_mode"] = args.crp_center_mode
     if args.probe_starts is not None:
         overrides["probe_starts"] = args.probe_starts
     method.update(overrides)
@@ -104,6 +106,8 @@ def main():
     parser.add_argument("--steps", type=int, help="override the ego training step budget")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--crp-decoder", choices=("paper", "categorical"), help="override the CRP behavior decoder")
+    parser.add_argument("--crp-center-mode", choices=("historical", "current_encoder"),
+                        help="how to compute existing cluster centers for CRP admission")
     parser.add_argument("--probe-starts", choices=("independent", "shared_random", "shared_preload"),
                         help="LBF initial maps for collecting clustering trajectories")
     parser.add_argument("--teammate-source", choices=("pool", "online"), default="pool")

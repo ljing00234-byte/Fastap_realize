@@ -20,6 +20,8 @@ def main():
                         help="shared pre-load choices (LBF default), unfiltered shared starts, "
                         "or the original independent sequence of maps")
     parser.add_argument("--decoder", choices=("paper", "categorical"), default="paper")
+    parser.add_argument("--center-mode", choices=("historical", "current_encoder"),
+                        help="use stored cluster centers or re-encode their members before admission")
     parser.add_argument("--probe-ego", choices=("own_original", "random_legal"), default="own_original",
                         help="use each teammate's original QMIX partners (default) or uniformly random legal actions")
     args = parser.parse_args()
@@ -35,7 +37,8 @@ def main():
 
     torch.set_num_threads(1)
     result = run_crp(args.teammate_pool, args.run_dir, seed=args.seed, probe_ego=args.probe_ego,
-                     probe_seed=args.probe_seed, decoder=args.decoder, probe_starts=args.probe_starts)
+                     probe_seed=args.probe_seed, decoder=args.decoder, probe_starts=args.probe_starts,
+                     center_mode=args.center_mode)
     print(json.dumps(result["clusters"], indent=2))
 
 

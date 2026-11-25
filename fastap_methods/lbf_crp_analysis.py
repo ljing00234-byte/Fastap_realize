@@ -15,6 +15,7 @@ import yaml
 from fastap_scenarios.fastap_rollout import FastapRolloutEnv, load_fastap_groups
 from .fastap_crp import TeammateCRP, _collate
 from .fastap_training import ROOT, _batch, collect_probe_episodes
+from .lbf_admission_trace import trace_admission
 from .lbf_probe_collection import collect_lbf_probes_on_starts
 from .lbf_probe_starts import select_probe_starts
 
@@ -59,7 +60,7 @@ def _food_outcomes(returns):
 
 
 def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own_original',
-            probe_seed=None, decoder='paper', probe_starts=None):
+            probe_seed=None, decoder='paper', probe_starts=None, center_mode=None):
     """Run standalone, sequential MAP clustering on CPU and publish its audit artifacts."""
     pool_path = (ROOT / pool_path).resolve()
     output_dir = (ROOT / output_dir).resolve()
@@ -72,6 +73,8 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own
     if method_config is None:
         method_config = yaml.safe_load((ROOT / 'configs/methods/fastap.yaml').read_text())
     cfg = {**method_config, **method_config['scenes']['lbf']}
+    if center_mode is None:
+        center_mode = cfg.get('crp_center_mode', 'historical')
     if probe_starts is None:
         probe_starts = cfg.get('probe_starts', 'shared_preload')
     if probe_starts not in ('independent', 'shared_random', 'shared_preload'):
@@ -100,11 +103,13 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own
               select_probe_starts(probe_seed, cfg['probe_episodes'], mode=probe_starts))
     rng = np.random.default_rng(probe_seed)
     admissions, snapshots, assignments, clusters = [], [], {}, {}
+    action_traces = []
     probe_outcomes = {}
     with closing(FastapRolloutEnv('lbf', groups, seed=probe_seed)) as env, torch.random.fork_rng(devices=[]):
         torch.random.default_generator.manual_seed(seed)
         model_args = dict(state_dim=env.state_shape, n_actions=env.n_actions, n_teammates=env.max_teammates)
-        crp = TeammateCRP(**model_args, alpha=cfg['alpha'], lr=cfg['lr'], device='cpu', decoder=decoder)
+        crp = TeammateCRP(**model_args, alpha=cfg['alpha'], lr=cfg['lr'], device='cpu', decoder=decoder,
+                          center_mode=center_mode)
         for i, group in enumerate(groups):
             if starts is None:
                 episodes = collect_probe_episodes(env, i, rng, cfg['probe_episodes'],
@@ -114,7 +119,6 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own
             returns = [ep['reward'][ep['filled']].sum().item() for ep in episodes]
             probe_outcomes[group.name] = dict(episode_returns=returns, **_food_outcomes(returns))
             counts = list(crp.counts)
-            centers = list(crp.centers)  # add_group replaces a center after each MAP decision.
             label = crp.add_group(group.name, _batch(episodes), model_steps=cfg['crp_model_steps'])
             cluster = f"C{label + 1}"
             assignments[group.name] = cluster
@@ -126,10 +130,17 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own
                                    last_model_loss=crp.last_model_loss,
                                    candidates=_candidate_scores(counts, crp.alpha,
                                                                 crp.last_assignment_log_scores.tolist())))
+            if decoder == 'categorical':
+                trace = trace_admission(crp.model, crp._probes[start:], counts,
+                                        crp.last_centers_before, crp.alpha, minibatch_size=crp.minibatch_size,
+                                        candidate_centers=crp.last_candidate_centers,
+                                        expected_scores=crp.last_assignment_log_scores,
+                                        map_seeds=starts['map_seeds'] if starts else None)
+                action_traces.append(dict(teammate=group.name, **trace))
             # Each snapshot can replay that exact assignment on the stored probe slice,
             # even after subsequent fitting changes the encoder and decoder parameters.
             snapshots.append(dict(teammate=group.name, probe_slice=probe_slice, counts_before=counts,
-                                  centers_before=centers, model=deepcopy(crp.model.state_dict())))
+                                  centers_before=list(crp.last_centers_before), model=deepcopy(crp.model.state_dict())))
         final = crp.state_dict()
         embeddings = _final_embeddings(crp, final['probes'], admissions)
         protocol = dict(seed=seed, probe_env_seed=probe_seed, probe_ego_seed=probe_seed,
@@ -137,7 +148,7 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own
                         probe_episodes=cfg['probe_episodes'], crp_model_steps=cfg['crp_model_steps'],
                         lr=cfg['lr'], minibatch_size=crp.minibatch_size, model_args=model_args,
                         episode_limit=env.episode_limit, probe_ego=probe_ego, decoder=decoder,
-                        probe_starts=probe_starts, shared_start_plan=starts,
+                        probe_starts=probe_starts, shared_start_plan=starts, center_mode=center_mode,
                         training_objective=('mean of within-episode mean categorical action NLL'
                                             if decoder == 'categorical' else 'Eq. 4 Gaussian trajectory mixture'),
                         admission_evidence='sum of action log likelihoods over observed slots, steps and episodes',
@@ -156,6 +167,11 @@ def run_crp(pool_path, output_dir, *, seed=7, method_config=None, probe_ego='own
     output_dir.parent.mkdir(exist_ok=True, parents=True)
     with TemporaryDirectory(dir=output_dir.parent, prefix=f".{output_dir.name}-") as staging_dir:
         staging = Path(staging_dir)
+        if action_traces:
+            summary['admission_action_trace'] = 'admission_actions.jsonl'
+            with (staging / summary['admission_action_trace']).open('x', encoding='utf-8') as stream:
+                for trace in action_traces:
+                    stream.write(json.dumps(trace, allow_nan=False) + '\n')
         _write_json(staging / 'clustering.json', summary)
         _write_json(staging / 'embeddings.json', embeddings)
         torch.save(dict(model_args=model_args, crp=final, admissions=snapshots), staging / 'crp.pt')

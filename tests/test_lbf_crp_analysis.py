@@ -75,6 +75,19 @@ class LbfCrpAnalysisTests(unittest.TestCase):
             self.assertEqual(random_egos['protocol']['shared_start_plan'], plan)
             own, random = [torch.load(directory / 'crp.pt', weights_only=True, map_location='cpu')['crp']['probes']
                            for directory in (own_dir, random_dir)]
+            self.assertFalse((own_dir / 'admission_actions.jsonl').exists())
+            categorical_dir = base / 'categorical'
+            cat = run_crp(pool, categorical_dir, method_config=config, decoder='categorical', center_mode='current_encoder')
+            recorded = (categorical_dir / cat['admission_action_trace']).read_text().splitlines()
+            traces = [json.loads(line) for line in recorded]
+            self.assertEqual([t['teammate'] for t in traces], cat['protocol']['order'])
+            for t, event in zip(traces, cat['admissions']):
+                self.assertEqual(t['winner'], event['cluster'])
+                self.assertEqual({r['map_seed'] for r in t['rows']}, set(plan['map_seeds']))
+                self.assertEqual([(r['episode'], r['step'], r['action']) for r in t['rows']],
+                                 [(0, step, 0) for step in range(25)])
+                for trace_score, observed in zip(t['candidates'], event['candidates']):
+                    self.assertAlmostEqual(trace_score['log_evidence'], observed['log_evidence'])
             self.assertEqual(len(own), len(random))
             self.assertEqual(len(own), 8)
             for own_probe, random_probe in zip(own, random):
