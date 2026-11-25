@@ -16,9 +16,10 @@ def main():
     parser.add_argument("--teammate-pool", type=Path, default=FORMAL_POOL, help="eight-member LBF pool.json")
     parser.add_argument("--seed", type=int, default=7, help="behavior-model seed")
     parser.add_argument("--probe-seed", type=int, help="fix probe maps and partners' RNG across fits (default seed + 1)")
-    parser.add_argument("--decoder", choices=("paper", "categorical"), help="override the behavior decoder (default paper)")
-    parser.add_argument("--masked-action-weight", type=float, help="weight of same-episode action completion (categorical)")
-    parser.add_argument("--masked-action-span", type=int, help="maximum number of steps to hide in each episode")
+    parser.add_argument("--probe-starts", choices=("shared_preload", "shared_random", "independent"),
+                        help="shared pre-load choices (LBF default), unfiltered shared starts, "
+                        "or the original independent sequence of maps")
+    parser.add_argument("--decoder", choices=("paper", "categorical"), default="paper")
     parser.add_argument("--probe-ego", choices=("own_original", "random_legal"), default="own_original",
                         help="use each teammate's original QMIX partners (default) or uniformly random legal actions")
     args = parser.parse_args()
@@ -34,8 +35,7 @@ def main():
 
     torch.set_num_threads(1)
     result = run_crp(args.teammate_pool, args.run_dir, seed=args.seed, probe_ego=args.probe_ego,
-                     probe_seed=args.probe_seed, decoder=args.decoder,
-                     masked_action_weight=args.masked_action_weight, masked_action_span=args.masked_action_span)
+                     probe_seed=args.probe_seed, decoder=args.decoder, probe_starts=args.probe_starts)
     print(json.dumps(result["clusters"], indent=2))
 
 

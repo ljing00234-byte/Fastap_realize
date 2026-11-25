@@ -14,9 +14,10 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from fastap_methods.lbf_probe_starts import pre_load_moves
 from scripts.audit_lbf_crp_order import compare_partitions
 from scripts.evaluate_lbf_crp_prediction import digest
-from scripts.lbf_rule_probes import DELTAS, RULES, action_probabilities
+from scripts.lbf_rule_probes import RULES, action_probabilities
 
 
 def behavior_events(obs, available, action):
@@ -24,16 +25,8 @@ def behavior_events(obs, available, action):
     load_allowed = bool(available[5])
     successes = np.array([int(load_allowed and action == 5), 0])
     opportunities = np.array([int(load_allowed), 0])
-    foods = obs[:9].reshape(3, 3)
-    cells = foods[foods[:, 2] > 0, :2]
-    if load_allowed or not len(cells):
-        return successes, opportunities
-    own = obs[9:11]
-    current = np.abs(own - cells).sum(-1).min()
-    next_distance = np.abs((own + DELTAS)[:, None, :] - cells).sum(-1).min(axis=1)
-    closer = next_distance < current
-    legal = available[1:5].astype(bool)
-    if (legal & closer).any() and (legal & ~closer).any():
+    closer = pre_load_moves(obs, available)
+    if closer.any():
         opportunities[1] = 1
         successes[1] = int(1 <= action <= 4 and closer[action-1])
     return successes, opportunities

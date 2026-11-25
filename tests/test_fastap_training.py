@@ -1,3 +1,4 @@
+import hashlib
 import json
 from contextlib import closing
 from pathlib import Path
@@ -56,6 +57,28 @@ class FastapTrainingTests(unittest.TestCase):
                 for ep, old in zip(actual, expected):
                     for field in old:
                         self.assertTrue(torch.equal(ep[field], old[field]), field)
+
+    def test_lbf_admissions_share_probe_maps_within_each_roster_size(self):
+        groups = [TeammateGroup(name, (lambda: stay,) * count)
+                  for name, count in [('solo_a', 1), ('pair', 2), ('solo_b', 1)]]
+        scene = yaml.safe_load((ROOT / 'configs/scenarios/lbf.yaml').read_text())
+        agent = yaml.safe_load((ROOT / 'configs/agents/fastap.yaml').read_text())
+        method = yaml.safe_load((ROOT / 'configs/methods/fastap.yaml').read_text())
+        method.update(t_max=1, batch_size=1, buffer_size=8, probe_episodes=2,
+                      crp_model_steps=1, test_nepisode=1)
+        with TemporaryDirectory(dir=ROOT/'.tmp/epymarl') as directory:
+            result = TRAINERS['fastap'](scene_config=scene, agent_config=agent, method_config=method,
+                                        run_dir=directory, teammate_groups=groups)
+            plans = result['probe_start_plans']
+            self.assertEqual(set(plans), {'1', '2'})
+            saved = torch.load(Path(directory)/result['checkpoint']/'training.pt', weights_only=True)
+            probes = saved['crp']['probes']
+            self.assertEqual(len(probes), 6)
+            for i, group in enumerate(groups):
+                hashes = plans[str(len(group.policies))]['initial_state_sha256']
+                for j, expected in enumerate(hashes):
+                    state = probes[2 * i + j][0][0]
+                    self.assertEqual(hashlib.sha256(state.numpy().tobytes()).hexdigest(), expected)
 
     def test_alternating_admissions_and_decentralized_checkpoint(self):
         scene = yaml.safe_load((ROOT / 'configs/scenarios/cn.yaml').read_text())

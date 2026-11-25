@@ -43,7 +43,6 @@ def check_storage(args):
 
 def train(args, free_bytes):
     import torch
-    from fastap_methods.fastap_crp import validate_masked_action_config
     from fastap_methods.fastap_training import SMOKE_SETTINGS, train_fastap
     from fastap_scenarios.fastap_rollout import load_fastap_groups
 
@@ -60,17 +59,12 @@ def train(args, free_bytes):
         overrides["t_max"] = args.steps
     if args.crp_decoder is not None:
         overrides["crp_decoder"] = args.crp_decoder
-    if args.masked_action_weight is not None:
-        overrides["masked_action_weight"] = args.masked_action_weight
-    if args.masked_action_span is not None:
-        overrides["masked_action_span"] = args.masked_action_span
+    if args.probe_starts is not None:
+        overrides["probe_starts"] = args.probe_starts
     method.update(overrides)
     # Command-line overrides take precedence over scene-specific settings as well.
     specific = method["scenes"][args.scene]
     specific.update({key: value for key, value in overrides.items() if key in specific})
-    effective = {**method, **specific}
-    validate_masked_action_config(effective.get("crp_decoder", "paper"), effective.get("masked_action_weight", 0.),
-                                  effective.get("masked_action_span", 3))
     torch.set_num_threads(1)
     args.run_dir.mkdir(parents=True, exist_ok=True)
     if args.teammate_source == "pool":
@@ -110,8 +104,8 @@ def main():
     parser.add_argument("--steps", type=int, help="override the ego training step budget")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--crp-decoder", choices=("paper", "categorical"), help="override the CRP behavior decoder")
-    parser.add_argument("--masked-action-weight", type=float, help="weight of same-episode action completion (categorical)")
-    parser.add_argument("--masked-action-span", type=int, help="maximum number of steps to hide in each episode")
+    parser.add_argument("--probe-starts", choices=("independent", "shared_random", "shared_preload"),
+                        help="LBF initial maps for collecting clustering trajectories")
     parser.add_argument("--teammate-source", choices=("pool", "online"), default="pool")
     parser.add_argument("--teammate-pool", type=project_path)
     parser.add_argument("--online-groups", type=int, default=8, help="maximum number of groups to train online")
@@ -121,6 +115,8 @@ def main():
     parser.add_argument("--expected-peak-mib", type=int, default=BASELINE_PEAK, help="reserve this GPU process peak")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.probe_starts is not None and args.scene != "lbf":
+        parser.error("--probe-starts applies to LBF")
     if args.teammate_source == "online" and args.teammate_pool is not None:
         parser.error("--teammate-pool requires --teammate-source pool")
     if args.teammate_source == "pool" and args.teammate_pool is None:

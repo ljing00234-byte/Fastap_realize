@@ -1,7 +1,7 @@
 name: fastap
 # Supplementary Table 1 (L is the number of groups admitted per round).
 scenes:
-  lbf: {alpha: 0.5, groups_per_round: 4, alpha_gce: 1.0, alpha_lce: 1.0, alpha_rec: 0.1}
+  lbf: {alpha: 0.5, groups_per_round: 4, alpha_gce: 1.0, alpha_lce: 1.0, alpha_rec: 0.1, probe_starts: shared_preload}
   pp:  {alpha: 2.5, groups_per_round: 1, alpha_gce: 0.4, alpha_lce: 0.4, alpha_rec: 0.2}
   cn:  {alpha: 2.5, groups_per_round: 1, alpha_gce: 0.4, alpha_lce: 0.4, alpha_rec: 0.2}
 kappa: 80.0
@@ -26,6 +26,3 @@ switch_interval: [5, 8]
 group_interval_steps: 50000
 probe_episodes: 8
 crp_model_steps: 64
-# Optional same-episode action completion for the categorical CRP decoder.
-masked_action_weight: 0.0
-masked_action_span: 3

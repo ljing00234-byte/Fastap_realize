@@ -64,20 +64,22 @@ policy = FastapPolicy.load(latest, device="cpu")
 
 ### LBF 正式队友的 CRP 分簇与图 6
 
-冻结正式池的八个单队友，按 T1 至 T8 的顺序做 CRP 分簇。默认使用各队友同一检查点的角色 0、1 作为采样搭档。所有开局都进入训练，包括没有采到食物的回合。每个队友加入时按当时的最大后验确定簇号。画图时用最后一次更新后的同一个编码器重新计算每条轨迹的 16 维向量，以便在同一个三维 PCA 坐标系下比较各簇。种子默认取 7。复跑时给第一条 Python 命令指定一个新目录，两条命令使用相同的目录。[论文 §5.3 与图 6](https://proceedings.mlr.press/v216/zhang23a/zhang23a.pdf#page=8)
+冻结正式池的八个单队友，按 T1 至 T8 的顺序做 CRP 分簇。默认使用各队友同一检查点的角色 0、1 作为采样搭档。每个队友加入时按当时的最大后验确定簇号。画图时用最后一次更新后的同一个编码器重新计算每条轨迹的 16 维向量，以便在同一个三维 PCA 坐标系下比较各簇。种子默认取 7。复跑时给第一条 Python 命令指定一个新目录，两条命令使用相同的目录。[论文 §5.3 与图 6](https://proceedings.mlr.press/v216/zhang23a/zhang23a.pdf#page=8)
+
+正式分簇和完整 Fastap 训练默认用 `--probe-starts shared_preload` 采集 LBF 分簇轨迹。按种子顺序查看自然开局，选出队友能看见食物、尚不能装载，且既有靠近食物又有不靠近食物的合法移动的棋盘。每名队友在完全相同的八张图上各跑一整局，并核对初始状态指纹。双队友组共用另一套棋盘，两名角色均须满足条件。采食成功和失败的轨迹都参与整局重建。筛选仅用于分簇探测；ego 策略训练和回报评估沿用各自的地图分布。`shared_random` 可用于同图但不筛开局的对照，`independent` 可复现早期按队友依次抽图的实验。
 
 ```bash
 source scripts/epymarl-env.sh
-run_dir=outputs/fastap_lbf_formal_pool_01/crp_own_original_seed7
+run_dir=outputs/fastap_lbf_formal_pool_01/crp_shared_preload_seed7
 envs/epymarl/bin/python -B scripts/cluster_lbf_teammates.py "$run_dir"
 envs/lbf-plot/bin/python -B scripts/plot_lbf_crp.py "$run_dir" --crossplay outputs/fastap_lbf_formal_pool_01/crossplay.json
 ```
 
-种子 7 的 64 个开局用随机搭档采样时，采食局为 0。用原配搭档采样时，62 局采到食物，其中 52 局采完三份，平均回报为 0.9115。两局零回报也计入行为模型训练。每组都有 7 或 8 局采食成功。
+早期 `independent` 设置下，种子 7 的 64 个开局用随机搭档采样时，采食局为 0。用原配搭档采样时，62 局采到食物，其中 52 局采完三份，平均回报为 0.9115。两局零回报也计入行为模型训练。每组都有 7 或 8 局采食成功。
 
 `clustering.json` 的 `probe_outcomes` 记录各队友的逐局回报、采到食物的局数及采完三份食物的局数。文件还记录成员、入簇顺序和各候选的后验打分依据，`embeddings.json` 保存每条探测轨迹的行为向量，`crp.pt` 保存探测数据和各次入簇时的模型。`figure6.png` 并排展示成员交叉评估、轨迹嵌入和簇间交叉评估。热力图复用同一正式池的有向实测回报，行指定原配的两个 ego，列指定换入的冻结队友。每个成员组合评估相同的 256 张地图，簇对的分数取块内所有组合的等权均值。`cluster_crossplay.json` 还单列排除原配后的簇内互换成绩。该汇总口径由本复现明确指定，论文未公开簇级评估的具体计算细节。
 
-初版随机搭档对照保存在 `crp_seed7`，可以向分簇命令传入新目录和 `--probe-ego random_legal` 复算。以下审计重放初版的 64 条探测轨迹，以检查式（4）的训练权重和图 6 的分离效果。下面的审计固定队友、入簇顺序和地图，分别使用模型种子 7、17、27。每个模型在 32 张未见地图上分别用随机搭档和同一对训练好的 T1 搭档探测，共 512 局。用入簇时的标签计算最终编码器的轮廓系数，并比较换成同簇、跨簇其他队友时的实测回报。轮廓系数是本地诊断指标，论文未报告该数值。
+初版随机搭档对照保存在 `crp_seed7`，可以向分簇命令传入新目录和 `--probe-ego random_legal --probe-starts independent` 复算。以下审计重放初版的 64 条探测轨迹，以检查式（4）的训练权重和图 6 的分离效果。下面的审计固定队友、入簇顺序和地图，分别使用模型种子 7、17、27。每个模型在 32 张未见地图上分别用随机搭档和同一对训练好的 T1 搭档探测，共 512 局。用入簇时的标签计算最终编码器的轮廓系数，并比较换成同簇、跨簇其他队友时的实测回报。轮廓系数是本地诊断指标，论文未报告该数值。
 
 ```bash
 source scripts/epymarl-env.sh
@@ -125,7 +127,7 @@ python_bin=envs/epymarl/bin/python
 for decoder in paper categorical; do
     for seed in 7 17 27; do
         "$python_bin" -B scripts/cluster_lbf_teammates.py "$experiment/$decoder/seed$seed" \
-            --decoder "$decoder" --seed "$seed" --probe-seed 8
+            --decoder "$decoder" --seed "$seed" --probe-seed 8 --probe-starts independent
     done
 done
 "$python_bin" -B scripts/evaluate_lbf_crp_prediction.py collect "$experiment"
@@ -153,7 +155,7 @@ source scripts/epymarl-env.sh
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=""
 experiment=outputs/lbf_rule_blind_v1
 python_bin=envs/epymarl/bin/python
-"$python_bin" -B scripts/lbf_rule_probes.py "$experiment"
+"$python_bin" -B scripts/lbf_rule_probes.py "$experiment" --start-mode shared_random
 for decoder in paper categorical; do
     "$python_bin" -B scripts/validate_lbf_rule_clusters.py fit "$experiment" --decoder "$decoder"
 done
@@ -165,24 +167,13 @@ done
 
 `partition_scores.json` 对照隐藏的规则标签计算调整兰德指数（ARI）。`rule_prediction.json` 比较相同身份、同规则另一副本、错配表示和仅状态模型的动作负对数似然。`positive_control.json` 记录两项对照：给定类型数，用装载和靠近食物的频率做层次聚类；给定候选规则，用观测动作的似然识别规则。两项对照使用同一批轨迹。
 
-### LBF 同局动作补全
-
-在 `categorical` 解码器上设置 `--masked-action-weight 1 --masked-action-span 3`，每次更新对同一批轨迹做两次 A→A 重建。第一次使用完整轨迹。第二次为每局随机遮住最多连续三步队友动作，将这些动作的输入替换为均匀向量，并仅在被遮位置计算交叉熵。两项损失都先在局内取平均，再给每局相同权重。辅助任务系数为 0 时运行原离散基线。正式 LBF 分簇入口和 Fastap 训练入口都支持这两个参数。
-
-下例复用前一节的匿名规则轨迹和基线检查点。留出测试让新旧模型补全完全相同的位置，分别统计全部有效动作和食物可见、尚不能装载时的移动选择。编码器能看到整局状态，因此这里测量的是同局回溯补全。入簇使用完整轨迹。
+要比较开局筛选的效果，沿用上面的规则、搭档和三个模型种子，在另一个目录采集与原基准不重叠的棋盘。下面的命令使用原离散解码器和整局重建，对两组模型分别用相同的普通留出图、相同的筛选留出图评分。`start_comparison.json` 保存动作机会数、各组分区及其与真实规则的一致程度。
 
 ```bash
-source scripts/epymarl-env.sh
-export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=""
-reference=outputs/lbf_rule_blind_v1
-experiment=outputs/lbf_rule_masked_span_v1
-python_bin=envs/epymarl/bin/python
-"$python_bin" -B scripts/validate_lbf_rule_clusters.py fit "$experiment" --data-dir "$reference" \
-    --decoder categorical --masked-action-weight 1 --masked-action-span 3
-"$python_bin" -B scripts/validate_lbf_rule_clusters.py transfer "$experiment" --data-dir "$reference" \
-    --paired-control "$reference"
-"$python_bin" -B scripts/validate_lbf_rule_clusters.py score "$experiment" --data-dir "$reference"
-"$python_bin" -B scripts/evaluate_lbf_masked_completion.py "$reference" "$experiment" --span 3
+selected=outputs/lbf_rule_informative_starts_v1
+"$python_bin" -B scripts/lbf_rule_probes.py "$selected" --start-mode shared_preload
+"$python_bin" -B scripts/validate_lbf_rule_clusters.py fit "$selected" --decoder categorical
+"$python_bin" -B scripts/evaluate_lbf_probe_starts.py "$experiment" "$selected"
 ```
 
 ## QMIX 基线模块

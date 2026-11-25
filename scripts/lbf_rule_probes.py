@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from fastap_methods.fastap_training import _batch, _episode
+from fastap_methods.lbf_probe_starts import pre_load_moves, select_probe_starts
 from fastap_scenarios.fastap_rollout import FastapRolloutEnv, load_fastap_groups
 from fastap_scenarios.policies import TeammateGroup
 
@@ -101,11 +102,13 @@ def collect_episode(rule, member_index, map_seed, ego_factories):
     return {key: episode[key] for key in FIELDS}, sidecar
 
 
-def collect(directory, pool):
+def collect(directory, pool, *, start_mode='shared_preload'):
     if ROOT/'outputs' not in directory.parents or ROOT/'outputs' not in pool.parents:
         raise ValueError('Use project output paths for the pool and data')
     if os.environ.get('FASTAP_ROOT') != str(ROOT):
         raise ValueError('Source scripts/epymarl-env.sh for project-local caches')
+    if start_mode not in ('shared_random', 'shared_preload'):
+        raise ValueError('Unknown map selection mode')
     directory.mkdir(parents=True, exist_ok=True)
     filenames = ['train.pt', 'support.pt', 'query.pt', 'observations.pt', 'truth.json']
     if any((directory / name).exists() for name in filenames):
@@ -122,11 +125,18 @@ def collect(directory, pool):
         stage = Path(temp)
         for split, (start, count) in SPLITS.items():
             episodes, local_rows, initial_hashes = [], [], []
-            seeds = list(range(start, start + count))
+            selection = None
+            if start_mode == 'shared_preload':
+                # Disjoint candidate streams also permit evaluation on the archived random maps.
+                selection = select_probe_starts(start + 100000, count, mode=start_mode)
+            seeds = selection['map_seeds'] if selection else list(range(start, start + count))
             for seed in seeds:
                 initial = set()
                 for index, rule in enumerate(roster):
                     episode, sidecar = collect_episode(rule, index, seed, first.probe_egos)
+                    if selection and not pre_load_moves(sidecar['obs'][0].numpy(),
+                                                        sidecar['available'][0].numpy()).any():
+                        raise RuntimeError(f'Selected start failed the observed teammate condition at {seed}')
                     initial.add(hashlib.sha256(episode['state'][0].numpy().tobytes()).hexdigest())
                     episodes.append(episode)
                     local_rows.append(sidecar)
@@ -134,12 +144,16 @@ def collect(directory, pool):
                     raise RuntimeError(f'Duplicate or unpaired map at seed {seed}')
                 initial_hashes.append(next(iter(initial)))
                 seen.update(initial)
+            if selection and initial_hashes != selection['initial_state_sha256']:
+                raise RuntimeError('Collected initial states differ from selected maps')
             batch = _batch(episodes)
             torch.save(dict(members=MEMBERS, map_seeds=seeds, batch=batch), stage/f'{split}.pt')
             local[split] = _batch(local_rows)
             splits[split] = dict(map_seeds=seeds, initial_state_sha256=initial_hashes,
                                   episodes=len(episodes), decisions=int(batch['filled'].sum()),
                                   distinct_initial_states=len(initial_hashes))
+            if selection:
+                splits[split]['selection'] = selection
         torch.save(local, stage/'observations.pt')
         digest = {name: hashlib.sha256((stage/name).read_bytes()).hexdigest() for name in filenames[:-1]}
         metadata = dict(
@@ -169,8 +183,10 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
     parser.add_argument('--pool', type=Path, default=DEFAULT_POOL)
+    parser.add_argument('--start-mode', choices=('shared_random', 'shared_preload'), default='shared_preload',
+                        help='use unfiltered shared maps or require an initial approach decision')
     args = parser.parse_args()
     os.environ['CUDA_VISIBLE_DEVICES'] = ''
-    summaries = collect(args.directory.resolve(), args.pool.resolve())
+    summaries = collect(args.directory.resolve(), args.pool.resolve(), start_mode=args.start_mode)
     for split, summary in summaries.items():
         print(f'{split}: {summary["episodes"]} episodes, {summary["decisions"]} valid actions')

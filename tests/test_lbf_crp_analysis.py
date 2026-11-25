@@ -64,19 +64,15 @@ class LbfCrpAnalysisTests(unittest.TestCase):
             summary = run_crp(pool, own_dir, method_config=config)
             total = summary['probe_outcomes']['total']
             self.assertEqual(summary['protocol']['probe_ego'], 'own_original')
+            self.assertEqual(summary['protocol']['probe_starts'], 'shared_preload')
+            plan = summary['protocol']['shared_start_plan']
+            self.assertEqual(len(plan['map_seeds']), 1)
             self.assertEqual((total['episodes'], total['any_food'], total['all_food']), (8, 0, 0))
             for member in members:
                 self.assertEqual(summary['probe_outcomes']['per_group'][member['id']]['episode_returns'], [0.])
-            legacy = run_crp(pool, random_dir, method_config=config, probe_ego='random_legal')
-            self.assertEqual(legacy['protocol']['probe_ego'], 'random_legal')
-            masked = run_crp(pool, base / 'masked', method_config=config, decoder='categorical',
-                             masked_action_weight=.5, masked_action_span=2)
-            self.assertEqual(masked['protocol']['masked_action_span'], 2)
-            self.assertEqual(masked['probe_outcomes'], summary['probe_outcomes'])
-            for event in masked['admissions']:
-                self.assertGreater(event['last_masked_action_loss'], 0.)
-                self.assertAlmostEqual(event['last_model_loss'], event['last_reconstruction_loss']
-                                       + .5 * event['last_masked_action_loss'], places=5)
+            random_egos = run_crp(pool, random_dir, method_config=config, probe_ego='random_legal')
+            self.assertEqual(random_egos['protocol']['probe_ego'], 'random_legal')
+            self.assertEqual(random_egos['protocol']['shared_start_plan'], plan)
             own, random = [torch.load(directory / 'crp.pt', weights_only=True, map_location='cpu')['crp']['probes']
                            for directory in (own_dir, random_dir)]
             self.assertEqual(len(own), len(random))
@@ -84,8 +80,15 @@ class LbfCrpAnalysisTests(unittest.TestCase):
             for own_probe, random_probe in zip(own, random):
                 states, random_states = own_probe[0], random_probe[0]
                 self.assertTrue(torch.equal(states[0], random_states[0]))
+                self.assertEqual(hashlib.sha256(states[0].numpy().tobytes()).hexdigest(),
+                                 plan['initial_state_sha256'][0])
                 self.assertTrue(torch.equal(states, states[0].expand_as(states)))
                 self.assertFalse(torch.equal(random_states, random_states[0].expand_as(random_states)))
+            legacy_dir = base / 'independent'
+            legacy = run_crp(pool, legacy_dir, method_config=dict(config, probe_starts='independent'))
+            self.assertIsNone(legacy['protocol']['shared_start_plan'])
+            old_probes = torch.load(legacy_dir / 'crp.pt', weights_only=True)['crp']['probes']
+            self.assertGreater(len({probe[0][0].numpy().tobytes() for probe in old_probes}), 1)
 
     def test_joint_observations_use_real_slots_and_preserve_padding(self):
         from contextlib import closing

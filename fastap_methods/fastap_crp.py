@@ -32,20 +32,12 @@ class BehaviorModel(nn.Module):
         else:
             self.categorical = nn.Linear(16, action_dim)
 
-    def encode(self, states, actions, slots, filled, *, action_mask=None):
-        """Embed s0, a0, ..., sT; an optional True mask hides the corresponding action."""
+    def encode(self, states, actions, slots, filled):
+        """Embed s0, a0, ..., sT; the terminal state is a real token."""
         active = slots & filled.unsqueeze(-1)
-        visible = active
-        if action_mask is not None:
-            if action_mask.shape != actions.shape or action_mask.dtype != torch.bool:
-                raise ValueError("action_mask must be a boolean mask with the same shape as actions")
-            visible = active & ~action_mask
-        onehot = F.one_hot(actions.masked_fill(~visible, 0), self.n_actions).to(states.dtype)
-        onehot = onehot.masked_fill(~visible.unsqueeze(-1), 0)
-        if action_mask is not None:
-            # An unknown observed action gets a uniform token; absent slots remain zero.
-            onehot = onehot.masked_fill((active & action_mask).unsqueeze(-1), 1. / self.n_actions)
-        previous = F.pad(onehot.flatten(-2), (0, 0, 1, 0))
+        onehot = F.one_hot(actions.masked_fill(~active, 0), self.n_actions).to(states.dtype)
+        onehot = onehot.masked_fill(~active.unsqueeze(-1), 0).flatten(-2)
+        previous = F.pad(onehot, (0, 0, 1, 0))
         valid_states = F.pad(filled, (1, 0), value=True)
         tokens = self.token(torch.cat((states, previous), dim=-1))
         positions = torch.arange(states.shape[1], device=states.device, dtype=states.dtype)
@@ -113,38 +105,6 @@ def _collate(probes, device):
     return [pad_sequence(series, batch_first=True).to(device) for series in zip(*probes)]
 
 
-def validate_masked_action_config(decoder, weight, span):
-    if decoder not in ('paper', 'categorical'):
-        raise ValueError("decoder must be paper or categorical")
-    if not isfinite(weight) or weight < 0:
-        raise ValueError("masked_action_weight must be finite and nonnegative")
-    if weight and decoder != 'categorical':
-        raise ValueError("The masked action objective requires a categorical decoder")
-    if type(span) is not int or span < 1:
-        raise ValueError("masked_action_span must be a positive integer")
-
-
-def sample_action_mask(slots, filled, span, generator):
-    """Uniformly draw one contiguous window per episode containing observed actions."""
-    if type(span) is not int or span < 1:
-        raise ValueError("masked_action_span must be a positive integer")
-    active = slots & filled.unsqueeze(-1)
-    observed = active.any(-1).cpu()
-    counts = observed.sum(1, keepdim=True)
-    if (counts == 0).any():
-        raise ValueError("Each trajectory needs at least one observed teammate action")
-    # Short episodes retain at least one visible action-bearing step when possible.
-    width = (counts - 1).clamp(min=1, max=span)
-    times = torch.arange(observed.size(1), device='cpu').unsqueeze(0)
-    ends = times + width
-    prefix = F.pad(observed.long().cumsum(1), (1, 0))
-    observed_in_window = prefix.gather(1, ends.clamp_max(observed.size(1))) - prefix[:, :-1]
-    candidates = (ends <= filled.sum(1, keepdim=True).cpu()) & (observed_in_window > 0)
-    starts = torch.multinomial(candidates.float(), 1, generator=generator)
-    window = (times >= starts) & (times < starts + width)
-    return active & window.to(active.device).unsqueeze(-1)
-
-
 class TeammateCRP:
     """Sequential MAP assignments to an unbounded set of teammate clusters.
 
@@ -155,17 +115,12 @@ class TeammateCRP:
     model_type = BehaviorModel
 
     def __init__(self, state_dim, n_actions, n_teammates, *, alpha, device='cpu', lr=.0005,
-                 minibatch_size=32, decoder='paper', masked_action_weight=0., masked_action_span=3,
-                 mask_seed=0):
+                 minibatch_size=32, decoder='paper'):
         if not (alpha > 0 and isfinite(alpha) and lr > 0 and minibatch_size > 0):
             raise ValueError("Invalid CRP concentration or optimizer settings")
         self.alpha = alpha
         self.device = torch.device(device)
         self.minibatch_size = minibatch_size
-        validate_masked_action_config(decoder, masked_action_weight, masked_action_span)
-        self.masked_action_weight = masked_action_weight
-        self.masked_action_span = masked_action_span
-        self.mask_generator = torch.Generator(device='cpu').manual_seed(mask_seed)
         # Existing paper-model subclasses can keep their three-argument constructor.
         decoder_args = {} if decoder == 'paper' else {'decoder': decoder}
         self.model = self.model_type(state_dim, n_actions, n_teammates, **decoder_args).to(self.device)
@@ -175,8 +130,6 @@ class TeammateCRP:
         self.centers = []
         self._probes = []
         self.last_model_loss = None
-        self.last_reconstruction_loss = None
-        self.last_masked_action_loss = None
         self.last_assignment_log_scores = None
 
     def _unpack(self, batch):
@@ -214,22 +167,12 @@ class TeammateCRP:
             indices = torch.randperm(len(probes), device='cpu')[:self.minibatch_size].tolist()
             sample = _collate([probes[i] for i in indices], self.device)
             embedding = self.model.encode(*sample)
-            reconstruction = self.behavior_loss(*sample, embedding)
-            loss = reconstruction
-            masked_nll = None
-            if self.masked_action_weight:
-                states, actions, slots, filled = sample
-                hidden = sample_action_mask(slots, filled, self.masked_action_span, self.mask_generator)
-                context = self.model.encode(*sample, action_mask=hidden)
-                masked_nll = self.model.episode_action_nll(states, actions, hidden, filled, context).mean()
-                loss = reconstruction + self.masked_action_weight * masked_nll
+            loss = self.behavior_loss(*sample, embedding)
             self.optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 10., error_if_nonfinite=True)
             self.optimizer.step()
         self.last_model_loss = loss.detach().item()
-        self.last_reconstruction_loss = reconstruction.detach().item()
-        self.last_masked_action_loss = None if masked_nll is None else masked_nll.detach().item()
 
     @torch.no_grad()
     def _assign(self, group):
@@ -278,30 +221,17 @@ class TeammateCRP:
                     assignments=dict(self.assignments), counts=list(self.counts), centers=list(self.centers),
                     probes=list(self._probes), alpha=self.alpha, minibatch_size=self.minibatch_size,
                     decoder=self.model.decoder,
-                    masked_action_weight=self.masked_action_weight, masked_action_span=self.masked_action_span,
-                    mask_generator_state=self.mask_generator.get_state(),
                     last_model_loss=self.last_model_loss,
-                    last_reconstruction_loss=self.last_reconstruction_loss,
-                    last_masked_action_loss=self.last_masked_action_loss,
                     last_assignment_log_scores=self.last_assignment_log_scores)
 
     def load_state_dict(self, saved):
         if saved.get('decoder', 'paper') != self.model.decoder:
             raise ValueError("Saved CRP decoder does not match the model")
-        weight, span = saved.get('masked_action_weight', 0.), saved.get('masked_action_span', 3)
-        validate_masked_action_config(self.model.decoder, weight, span)
-        if weight and 'mask_generator_state' not in saved:
-            raise ValueError("Missing mask generator state for auxiliary training")
         self.model.load_state_dict(saved['model'])
         self.optimizer.load_state_dict(saved['optimizer'])
         self.alpha, self.minibatch_size = saved['alpha'], saved['minibatch_size']
-        self.masked_action_weight, self.masked_action_span = weight, span
-        if 'mask_generator_state' in saved:
-            self.mask_generator.set_state(saved['mask_generator_state'].cpu())
         self.assignments, self.counts = dict(saved['assignments']), list(saved['counts'])
         self.centers = [center.to(self.device) for center in saved['centers']]
         self._probes = [tuple(field.cpu() for field in probe) for probe in saved['probes']]
         self.last_model_loss = saved['last_model_loss']
-        self.last_reconstruction_loss = saved.get('last_reconstruction_loss', self.last_model_loss)
-        self.last_masked_action_loss = saved.get('last_masked_action_loss')
         self.last_assignment_log_scores = saved.get('last_assignment_log_scores')

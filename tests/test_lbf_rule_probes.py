@@ -1,9 +1,11 @@
 import unittest
+from hashlib import sha256
 
 import numpy as np
 import torch
 
 from fastap_scenarios.policies import stay
+from fastap_methods.lbf_probe_starts import pre_load_moves, select_probe_starts
 from scripts.lbf_rule_probes import RULES, action_probabilities, collect_episode
 
 
@@ -41,6 +43,14 @@ class LbfRuleProbeTests(unittest.TestCase):
         indices = first['teammate_actions'][valid, 0]
         self.assertTrue(local['available'][valid].gather(1, indices[:, None]).all())
         self.assertFalse(first['teammate_mask'][:, 1].any())
+
+    def test_diagnostic_board_replays_before_first_action_for_all_three_rules(self):
+        maps = select_probe_starts(6930000, 1, mode='shared_preload')
+        for index, rule in enumerate(RULES):
+            episode, local = collect_episode(rule, index, maps['map_seeds'][0], (lambda: stay, lambda: stay))
+            self.assertEqual(sha256(episode['state'][0].numpy().tobytes()).hexdigest(),
+                             maps['initial_state_sha256'][0])
+            self.assertTrue(pre_load_moves(local['obs'][0].numpy(), local['available'][0].numpy()).any())
 
 
 if __name__ == '__main__':
